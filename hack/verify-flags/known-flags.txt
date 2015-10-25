@@ -170,6 +170,7 @@ enable-swagger-ui
 etcd-address
 etcd-cafile
 etcd-certfile
+enforced-docker-registry
 etcd-config
 etcd-keyfile
 etcd-mutation-timeout
@@ -254,8 +255,11 @@ healthz-bind-address
 healthz-port
 horizontal-pod-autoscaler-sync-period
 host-cluster-context
+host-automounts
 host-ipc-sources
 host-network-sources
+host-paths-allowed
+host-path-prefixes-allowed
 host-pid-sources
 host-port-endpoints
 host-system-namespace
