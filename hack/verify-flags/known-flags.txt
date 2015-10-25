@@ -151,6 +151,7 @@ enable-garbage-collector
 etcd-address
 etcd-cafile
 etcd-certfile
+enforced-docker-registry
 etcd-config
 etcd-keyfile
 etcd-mutation-timeout
@@ -222,8 +223,11 @@ hard
 healthz-bind-address
 healthz-port
 horizontal-pod-autoscaler-sync-period
+host-automounts
 host-ipc-sources
 host-network-sources
+host-paths-allowed
+host-path-prefixes-allowed
 host-pid-sources
 host-port-endpoints
 hostname-override
