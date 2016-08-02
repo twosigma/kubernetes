@@ -89,7 +89,7 @@ func isVolumeConflict(volume api.Volume, pod *api.Pod) bool {
 		if volume.RBD != nil && existingVolume.RBD != nil {
 			mon, pool, image := volume.RBD.CephMonitors, volume.RBD.RBDPool, volume.RBD.RBDImage
 			emon, epool, eimage := existingVolume.RBD.CephMonitors, existingVolume.RBD.RBDPool, existingVolume.RBD.RBDImage
-			if haveSame(mon, emon) && pool == epool && image == eimage {
+			if haveSame(mon, emon) && pool == epool && image == eimage && (!volume.RBD.ReadOnly || !existingVolume.RBD.ReadOnly) {
 				return true
 			}
 		}

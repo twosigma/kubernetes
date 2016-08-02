@@ -19,6 +19,7 @@ package rbd
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -236,5 +237,21 @@ func TestPersistentClaimReadOnlyFlag(t *testing.T) {
 
 	if !mounter.GetAttributes().ReadOnly {
 		t.Errorf("Expected true for mounter.IsReadOnly")
+	}
+}
+
+func TestImageSnapshotMatched(t *testing.T) {
+	var tests = []struct{pool, image, output string; matched bool} {
+		{"pool", "abc@123", "pool\nabc\n123\n", true},
+		{"pool", "abc", "pool\nabc\n-\n", true},
+		{"pool", "abc@123", "pool\nabc\n-\n", false},
+		{"pool", "abc", "pool\nabc\n123\n", false},
+	}
+
+	for _, test := range tests {
+		if imageSnapshotMatched(test.pool, test.image, test.output) != test.matched {
+			t.Errorf("pool \"%s\", image \"%s\", output \"%s\", matched result should be %s",
+				test.pool, test.image, test.output, strconv.FormatBool(test.matched))
+		}
 	}
 }
