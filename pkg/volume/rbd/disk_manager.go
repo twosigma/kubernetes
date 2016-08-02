@@ -102,11 +102,14 @@ func diskTearDown(manager diskManager, c rbdUnmounter, volPath string, mounter m
 	// If len(refs) is 1, then all bind mounts have been removed, and the
 	// remaining reference is the global mount. It is safe to detach.
 	if len(refs) == 1 {
+		glog.V(1).Infof("ref count of %s is 1, safe to detach", volPath)
 		mntPath := refs[0]
 		if err := manager.DetachDisk(c, mntPath); err != nil {
 			glog.Errorf("failed to detach disk from %s", mntPath)
 			return err
 		}
+	} else {
+		glog.V(1).Infof("ref count of %s is not 1, cannot detach", volPath)
 	}
 
 	notMnt, mntErr := mounter.IsLikelyNotMountPoint(volPath)
