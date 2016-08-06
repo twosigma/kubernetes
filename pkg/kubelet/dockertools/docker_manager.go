@@ -337,6 +337,19 @@ func (dm *DockerManager) determineContainerIP(podNamespace, podName string, cont
 		if result == "" {
 			result = container.NetworkSettings.GlobalIPv6Address
 		}
+		// TS look for IPs from the list of networks
+		if result == "" && container.NetworkSettings.Networks != nil {
+			for _, info := range container.NetworkSettings.Networks {
+				if info.IPAddress != "" {
+					result = info.IPAddress
+					break
+				}
+				if info.GlobalIPv6Address != "" {
+					result = info.GlobalIPv6Address
+					break
+				}
+			}
+		}
 	}
 
 	if dm.networkPlugin.Name() != network.DefaultPluginName {
@@ -1658,7 +1671,16 @@ func (dm *DockerManager) createPodInfraContainer(pod *api.Pod) (kubecontainer.Do
 	netNamespace := ""
 	var ports []api.ContainerPort
 
-	if kubecontainer.IsHostNetworkPod(pod) {
+	if val, ok := pod.ObjectMeta.Annotations["ts/network"]; ok {
+		// TODO check the existence of the network and or host label?
+		netNamespace = val
+		for _, container := range pod.Spec.InitContainers {
+			ports = append(ports, container.Ports...)
+		}
+		for _, container := range pod.Spec.Containers {
+			ports = append(ports, container.Ports...)
+		}
+	} else if kubecontainer.IsHostNetworkPod(pod) {
 		netNamespace = namespaceModeHost
 	} else if dm.networkPlugin.Name() == "cni" || dm.networkPlugin.Name() == "kubenet" {
 		netNamespace = "none"
