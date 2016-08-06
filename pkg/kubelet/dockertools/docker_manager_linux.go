@@ -44,6 +44,19 @@ func getContainerIP(container *dockertypes.ContainerJSON) string {
 		if result == "" {
 			result = container.NetworkSettings.GlobalIPv6Address
 		}
+		// TS look for IPs from the list of networks
+		if result == "" && container.NetworkSettings.Networks != nil {
+			for _, info := range container.NetworkSettings.Networks {
+				if info.IPAddress != "" {
+					result = info.IPAddress
+					break
+				}
+				if info.GlobalIPv6Address != "" {
+					result = info.GlobalIPv6Address
+					break
+				}
+			}
+		}
 	}
 	return result
 }

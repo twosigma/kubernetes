@@ -1962,7 +1962,16 @@ func (dm *DockerManager) createPodInfraContainer(pod *v1.Pod) (kubecontainer.Doc
 	netNamespace := ""
 	var ports []v1.ContainerPort
 
-	if kubecontainer.IsHostNetworkPod(pod) {
+	if val, ok := pod.ObjectMeta.Annotations["ts/network"]; ok {
+		// TODO check the existence of the network and or host label?
+		netNamespace = val
+		for _, container := range pod.Spec.InitContainers {
+			ports = append(ports, container.Ports...)
+		}
+		for _, container := range pod.Spec.Containers {
+			ports = append(ports, container.Ports...)
+		}
+	} else if kubecontainer.IsHostNetworkPod(pod) {
 		netNamespace = namespaceModeHost
 	} else if dm.pluginDisablesDockerNetworking() {
 		netNamespace = "none"
