@@ -64,4 +64,10 @@ echo CASSANDRA_BROADCAST_ADDRESS ${POD_IP}
 echo CASSANDRA_BROADCAST_RPC_ADDRESS ${POD_IP}
 
 export CLASSPATH=/kubernetes-cassandra.jar
+# export LOCAL_JMX=no
+
+echo "stomp_interface: $OPS_CENTER" >> /agent/datastax-agent-5.2.4/conf/address.yaml
+echo "cluster_name: $CLUSTER_NAME" >> /etc/cassandra/cassandra.yaml
+
+/agent/datastax-agent-5.2.4/bin/datastax-agent &
 cassandra -f
