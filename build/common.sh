@@ -617,6 +617,7 @@ function kube::build::run_build_command() {
 
   # Clean up container from any previous run
   kube::build::destroy_container "${KUBE_BUILD_CONTAINER_NAME}"
+  echo "${docker_cmd[@]}" "$@" > /tmp/output
   "${docker_cmd[@]}" "$@"
   kube::build::destroy_container "${KUBE_BUILD_CONTAINER_NAME}"
 }

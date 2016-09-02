@@ -67,31 +67,31 @@ else
   # The server platform we are building on.
   readonly KUBE_SERVER_PLATFORMS=(
     linux/amd64
-    linux/arm
-    linux/arm64
-    linux/ppc64le # note: hyperkube is temporarily disabled due to a linking error
+#    linux/arm
+#    linux/arm64
+#    linux/ppc64le # note: hyperkube is temporarily disabled due to a linking error
   )
 
   # If we update this we should also update the set of golang compilers we build
   # in 'build/build-image/cross/Dockerfile'. However, it's only a bit faster since go 1.5, not mandatory
   readonly KUBE_CLIENT_PLATFORMS=(
     linux/amd64
-    linux/386
-    linux/arm
-    linux/arm64
-    linux/ppc64le
-    darwin/amd64
-    darwin/386
-    windows/amd64
-    windows/386
+#     linux/386
+#     linux/arm
+#     linux/arm64
+#     linux/ppc64le
+#     darwin/amd64
+#     darwin/386
+#     windows/amd64
+#     windows/386
   )
 
   # Which platforms we should compile test targets for. Not all client platforms need these tests
   readonly KUBE_TEST_PLATFORMS=(
     linux/amd64
-    darwin/amd64
-    windows/amd64
-    linux/arm
+#    darwin/amd64
+#    windows/amd64
+#    linux/arm
   )
 fi
 

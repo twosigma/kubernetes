@@ -39,6 +39,8 @@ func (f *FakeCmd) Output() ([]byte, error) {
 
 func (f *FakeCmd) SetDir(dir string) {}
 
+func (f *FakeCmd) SetEnv(env []string) {}
+
 type fakeExitError struct {
 	exited     bool
 	statusCode int
