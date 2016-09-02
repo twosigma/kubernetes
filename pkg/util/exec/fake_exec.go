@@ -52,6 +52,7 @@ type FakeCmd struct {
 	Dirs                 []string
 	Stdin                io.Reader
 	Stdout               io.Writer
+	Env                  []string
 }
 
 func InitFakeCmd(fake *FakeCmd, cmd string, args ...string) Cmd {
@@ -71,6 +72,14 @@ func (fake *FakeCmd) SetStdin(in io.Reader) {
 
 func (fake *FakeCmd) SetStdout(out io.Writer) {
 	fake.Stdout = out
+}
+
+func (fake *FakeCmd) SetEnv(env []string) {
+	fake.Env = env
+}
+
+func (fake *FakeCmd) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
 }
 
 func (fake *FakeCmd) CombinedOutput() ([]byte, error) {

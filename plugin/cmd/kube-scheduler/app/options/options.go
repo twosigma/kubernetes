@@ -38,6 +38,10 @@ type SchedulerServer struct {
 	// location information.
 	Kubeconfig string
 	// Dynamic conifguration for scheduler features.
+
+	// TsSigner string
+	// TsTicketDir string
+	// TsReceivingUser string
 }
 
 // NewSchedulerServer creates a new SchedulerServer with default parameters
@@ -76,4 +80,8 @@ func (s *SchedulerServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.FailureDomains, "failure-domains", api.DefaultFailureDomains, "Indicate the \"all topologies\" set for an empty topologyKey when it's used for PreferredDuringScheduling pod anti-affinity.")
 	leaderelection.BindFlags(&s.LeaderElection, fs)
 	config.DefaultFeatureGate.AddFlag(fs)
+
+	// fs.StringVar(&s.TsSigner, "ts-token-signer", s.TsSigner, "binary to sign tokens")
+	// fs.StringVar(&s.TsTicketDir, "ts-ticket-dir", s.TsTicketDir, "directory that has tickets")
+	// fs.StringVar(&s.TsReceivingUser, "ts-receiving-user", s.TsReceivingUser, "user to receive tickets")
 }
