@@ -251,3 +251,11 @@ func (eic execInContainer) SetStdin(in io.Reader) {
 func (eic execInContainer) SetStdout(out io.Writer) {
 	//unimplemented
 }
+
+func (eic execInContainer) SetEnv(env []string) {
+	//unimplemented
+}
+
+func (eic execInContainer) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
+}
