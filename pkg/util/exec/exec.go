@@ -48,6 +48,8 @@ type Cmd interface {
 	SetDir(dir string)
 	SetStdin(in io.Reader)
 	SetStdout(out io.Writer)
+	SetEnv(env []string)
+	StdinPipe() (io.WriteCloser, error)
 }
 
 // ExitError is an interface that presents an API similar to os.ProcessState, which is
@@ -91,6 +93,14 @@ func (cmd *cmdWrapper) SetStdin(in io.Reader) {
 
 func (cmd *cmdWrapper) SetStdout(out io.Writer) {
 	cmd.Stdout = out
+}
+
+func (cmd *cmdWrapper) SetEnv(env []string) {
+	cmd.Env = env
+}
+
+func (cmd *cmdWrapper) StdinPipe() (io.WriteCloser, error) {
+	return (*osexec.Cmd)(cmd).StdinPipe()
 }
 
 // CombinedOutput is part of the Cmd interface.
