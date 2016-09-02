@@ -44,6 +44,12 @@ func (f *FakeCmd) SetStdin(in io.Reader) {}
 
 func (f *FakeCmd) SetStdout(out io.Writer) {}
 
+func (f *FakeCmd) SetEnv(env []string) {}
+
+func (f *FakeCmd) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
+}
+
 type fakeExitError struct {
 	exited     bool
 	statusCode int
