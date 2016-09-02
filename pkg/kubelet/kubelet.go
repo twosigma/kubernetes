@@ -1307,7 +1307,60 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 		}
 		mounts = append(mounts, *hostsMount)
 	}
+	if tkt, ok := pod.ObjectMeta.Annotations["ts/ticket"]; ok {
+		if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+			tktMount, err := makeTktMount(podDir, user, tkt)
+			if err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, *tktMount)
+		}
+	}
 	return mounts, nil
+}
+
+func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
+	tktFilePath := path.Join(podDir, "tkt")
+	if err := decodeTicket(tktFilePath, tkt, userName, "twosigma"); err != nil {
+		return nil, err
+	}
+	return &kubecontainer.Mount{
+		Name: "ts-tkt",
+		ContainerPath: path.Join("/var/spool/tickets", userName),
+		HostPath: tktFilePath,
+		ReadOnly: false,
+	}, nil
+}
+
+func decodeTicket(dest, data, user, group string) error {
+	exe := utilexec.New()
+	cmd := exe.Command("/usr/local/bin/gss-token", "-r", "-C", dest)
+	env := "KRB5_KTNAME=/var/spool/keytabs/tsk8s"
+	cmd.SetEnv([]string{env})
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	io.Copy(stdin, bytes.NewBufferString(data))
+	stdin.Close()
+	out, err1 := cmd.CombinedOutput()
+	if err1 != nil {
+		glog.Errorf("error decoding ticket, error: %v, output: %v", err1, string(out))
+		return err1
+	}
+	err1 = os.Chmod(dest, 0600)
+	if err1 != nil {
+		glog.Errorf("error changing tkt file permission to 0600, error: %v", err1)
+		return err1
+	}
+	owner := user+":"+group
+	cmd = exe.Command("/bin/chown", owner, dest)
+	_, err1 = cmd.CombinedOutput()
+	if err1 != nil {
+		glog.Errorf("error changing owner to %v, error: %v", owner, err1)
+		return err1
+	}
+	return nil
 }
 
 // makeHostsMount makes the mountpoint for the hosts file that the containers

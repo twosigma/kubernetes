@@ -18,6 +18,7 @@ package exec
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/probe"
@@ -40,6 +41,10 @@ func (f *FakeCmd) Output() ([]byte, error) {
 func (f *FakeCmd) SetDir(dir string) {}
 
 func (f *FakeCmd) SetEnv(env []string) {}
+
+func (f *FakeCmd) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
+}
 
 type fakeExitError struct {
 	exited     bool

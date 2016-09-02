@@ -18,6 +18,7 @@ package exec
 
 import (
 	"fmt"
+	"io"
 )
 
 // A simple scripted Interface type.
@@ -49,6 +50,7 @@ type FakeCmd struct {
 	CombinedOutputCalls  int
 	CombinedOutputLog    [][]string
 	Dirs                 []string
+	Env                  []string
 }
 
 func InitFakeCmd(fake *FakeCmd, cmd string, args ...string) Cmd {
@@ -60,6 +62,14 @@ type FakeCombinedOutputAction func() ([]byte, error)
 
 func (fake *FakeCmd) SetDir(dir string) {
 	fake.Dirs = append(fake.Dirs, dir)
+}
+
+func (fake *FakeCmd) SetEnv(env []string) {
+	fake.Env = env
+}
+
+func (fake *FakeCmd) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
 }
 
 func (fake *FakeCmd) CombinedOutput() ([]byte, error) {

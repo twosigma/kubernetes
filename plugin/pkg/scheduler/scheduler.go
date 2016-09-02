@@ -20,10 +20,12 @@ package scheduler
 // contrib/mesos/pkg/scheduler/.
 
 import (
+	"fmt"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/record"
+	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/metrics"
@@ -119,6 +121,46 @@ func (s *Scheduler) scheduleOne() {
 	// will self-repair.
 	assumed := *pod
 	assumed.Spec.NodeName = dest
+	// if s.TsTicketDir != nil && s.TsSigner != nil && s.TsReceivingUser != nil {
+	// 	if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
+	// 		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
+	// 			// user/realm are specified, we should encrypt tickets and stick it inside
+	// 			exe := exec.New()
+	// 			out, err := exec.Command(
+	// 				fmt.Sprintf("KRB5CCNAME=%s/%s/%s", s.TsTicketDir, realm, user),
+	// 				s.TsSigner,
+	// 				"-D",
+	// 				fmt.Sprintf("%s@%s", s.TsReceivingUser, dest)).CombinedOutput()
+	// 			if err != nil {
+	// 				assumed.ObjectMeta.Annotations["ts/ticket"] = out
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+	// go with a simple hard coded version as poc
+	if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
+		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
+			// user/realm are specified, we should encrypt tickets and stick it inside
+			glog.Infof("got ts/user=%s, ts/realm=%s, trying to create token", user, realm)
+			env := fmt.Sprintf("KRB5CCNAME=%s/@%s/%s", "/home/tsk8s/tickets", realm, user)
+			exe := exec.New()
+			cmd := exe.Command(
+				"/usr/local/bin/gss-token",
+				"-D",
+				fmt.Sprintf("%s@%s", "tsk8s", dest))
+			cmd.SetEnv([]string{env})
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				glog.V(5).Infof("token created: %s", out)
+				assumed.ObjectMeta.Annotations["ts/ticket"] = string(out)
+			} else {
+				glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
+					err, string(out), dest, env)
+			}
+		}
+	}
+
 	if err := s.config.SchedulerCache.AssumePod(&assumed); err != nil {
 		glog.Errorf("scheduler cache AssumePod failed: %v", err)
 	}
@@ -127,7 +169,7 @@ func (s *Scheduler) scheduleOne() {
 		defer metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
 
 		b := &api.Binding{
-			ObjectMeta: api.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name},
+			ObjectMeta: api.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name, Annotations: assumed.ObjectMeta.Annotations},
 			Target: api.ObjectReference{
 				Kind: "Node",
 				Name: dest,

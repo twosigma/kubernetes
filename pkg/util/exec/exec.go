@@ -17,6 +17,7 @@ limitations under the License.
 package exec
 
 import (
+	"io"
 	osexec "os/exec"
 	"syscall"
 )
@@ -45,6 +46,8 @@ type Cmd interface {
 	// Output runs the command and returns standard output, but not standard err
 	Output() ([]byte, error)
 	SetDir(dir string)
+	SetEnv(env []string)
+	StdinPipe() (io.WriteCloser, error)
 }
 
 // ExitError is an interface that presents an API similar to os.ProcessState, which is
@@ -80,6 +83,14 @@ type cmdWrapper osexec.Cmd
 
 func (cmd *cmdWrapper) SetDir(dir string) {
 	cmd.Dir = dir
+}
+
+func (cmd *cmdWrapper) SetEnv(env []string) {
+	cmd.Env = env
+}
+
+func (cmd *cmdWrapper) StdinPipe() (io.WriteCloser, error) {
+	return (*osexec.Cmd)(cmd).StdinPipe()
 }
 
 // CombinedOutput is part of the Cmd interface.

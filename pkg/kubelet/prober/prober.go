@@ -19,6 +19,7 @@ package prober
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -247,4 +248,12 @@ func (eic execInContainer) Output() ([]byte, error) {
 
 func (eic execInContainer) SetDir(dir string) {
 	//unimplemented
+}
+
+func (eic execInContainer) SetEnv(env []string) {
+	//unimplemented
+}
+
+func (eic execInContainer) StdinPipe() (io.WriteCloser, error) {
+	return nil, nil
 }
