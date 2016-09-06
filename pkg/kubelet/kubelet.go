@@ -1266,10 +1266,10 @@ func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
 		return nil, err
 	}
 	return &kubecontainer.Mount{
-		Name: "ts-tkt",
+		Name:          "ts-tkt",
 		ContainerPath: path.Join("/var/spool/tickets", userName),
-		HostPath: tktFilePath,
-		ReadOnly: false,
+		HostPath:      tktFilePath,
+		ReadOnly:      false,
 	}, nil
 }
 
@@ -1294,7 +1294,7 @@ func decodeTicket(dest, data, user, group string) error {
 		glog.Errorf("error changing tkt file permission to 0600, error: %v", err1)
 		return err1
 	}
-	owner := user+":"+group
+	owner := user + ":" + group
 	cmd = exe.Command("/bin/chown", owner, dest)
 	_, err1 = cmd.CombinedOutput()
 	if err1 != nil {
@@ -1650,6 +1650,16 @@ func containerResourceRuntimeValue(fs *api.ResourceFieldSelector, pod *api.Pod, 
 	}
 }
 
+func Filter(vs []string, f func(string) bool) []string {
+	vsf := make([]string, 0)
+	for _, v := range vs {
+		if f(v) {
+			vsf = append(vsf, v)
+		}
+	}
+	return vsf
+}
+
 // GetClusterDNS returns a list of the DNS servers and a list of the DNS search
 // domains of the cluster.
 func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
@@ -1663,6 +1673,10 @@ func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
 		defer f.Close()
 
 		hostDNS, hostSearch, err = kl.parseResolvConf(f)
+		// TS mod, ignore link local dns resolvers to skip unbound
+		hostDNS = Filter(hostDNS, func(v string) bool {
+			return !strings.HasPrefix(v, "127.")
+		})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1691,6 +1705,7 @@ func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
 			hostDNS = []string{"127.0.0.1"}
 			hostSearch = []string{"."}
 		}
+		glog.V(5).Infof("hostDNS=%v, hostSearch=%v", hostDNS, hostSearch)
 		return hostDNS, hostSearch, nil
 	}
 
