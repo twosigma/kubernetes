@@ -21,6 +21,9 @@ package scheduler
 
 import (
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -117,43 +120,71 @@ func (s *Scheduler) scheduleOne() {
 	// immediately.
 	assumed := *pod
 	assumed.Spec.NodeName = dest
-	// if s.TsTicketDir != nil && s.TsSigner != nil && s.TsReceivingUser != nil {
-	// 	if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
-	// 		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
-	// 			// user/realm are specified, we should encrypt tickets and stick it inside
-	// 			exe := exec.New()
-	// 			out, err := exec.Command(
-	// 				fmt.Sprintf("KRB5CCNAME=%s/%s/%s", s.TsTicketDir, realm, user),
-	// 				s.TsSigner,
-	// 				"-D",
-	// 				fmt.Sprintf("%s@%s", s.TsReceivingUser, dest)).CombinedOutput()
-	// 			if err != nil {
-	// 				assumed.ObjectMeta.Annotations["ts/ticket"] = out
-	// 			}
-	// 		}
-	// 	}
-	// }
 
+	tokenFile := ""
 	// go with a simple hard coded version as poc
-	if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
-		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
-			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof("got ts/user=%s, ts/realm=%s, trying to create token", user, realm)
-			env := fmt.Sprintf("KRB5CCNAME=%s/@%s/%s", "/home/tsk8s/tickets", realm, user)
+	if token, ok := assumed.ObjectMeta.Annotations["ts/token"]; ok {
+		// first we check if "ts/token" is present, if so we decode the token and re-encrypt
+		glog.Infof("got ts/token=%s", token)
+
+		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
+		if err != nil {
+			glog.Errorf("failed to create tmp file: %v", err)
+		} else {
+			tmpFile := file.Name()
+			defer os.Remove(tmpFile)
+			env := "KRB5_KTNAME=/var/spool/keytabs/tsk8s"
 			exe := exec.New()
 			cmd := exe.Command(
 				"/usr/local/bin/gss-token",
-				"-D",
-				fmt.Sprintf("%s@%s", "tsk8s", dest))
+				"-r",
+				"-C",
+				tmpFile)
 			cmd.SetEnv([]string{env})
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				glog.V(5).Infof("token created: %s", out)
-				assumed.ObjectMeta.Annotations["ts/ticket"] = string(out)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				glog.Errorf("unable to obtain stdin of child process: %v", err)
 			} else {
-				glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
-					err, string(out), dest, env)
+				io.WriteString(stdin, token+"\n")
+				stdin.Close()
+				out, err := cmd.CombinedOutput()
+				if err == nil {
+					tokenFile = tmpFile
+					glog.Infof("token decrypt successfully to %s", tmpFile)
+				} else {
+					glog.Errorf("unable to decode token: %s", out)
+				}
 			}
+		}
+	} else if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
+		// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
+		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
+			// user/realm are specified, we should encrypt tickets and stick it inside
+			glog.Infof("got ts/user=%s, ts/realm=%s, trying to create token from prestashed ticket", user, realm)
+			tktPath := fmt.Sprintf("/home/tsk8s/tickets/@%s/%s", realm, user)
+			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
+				glog.Errorf("prestashed ticket for %s@%s does not exist", user, realm)
+			} else {
+				tokenFile = tktPath
+			}
+		}
+	}
+
+	if tokenFile != "" {
+		env := fmt.Sprintf("KRB5CCNAME=%s", tokenFile)
+		exe := exec.New()
+		cmd := exe.Command(
+			"/usr/local/bin/gss-token",
+			"-D",
+			fmt.Sprintf("%s@%s", "tsk8s", dest))
+		cmd.SetEnv([]string{env})
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			glog.V(5).Infof("token created: %s", out)
+			assumed.ObjectMeta.Annotations["ts/ticket"] = string(out)
+		} else {
+			glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
+				err, string(out), dest, env)
 		}
 	}
 
