@@ -1256,11 +1256,13 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 	}
 	if tkt, ok := pod.ObjectMeta.Annotations["ts/ticket"]; ok {
 		if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+			glog.V(5).Infof("delegated ticket found in pod spec for user %s: %s", user, tkt)
 			tktMount, err := makeTktMount(podDir, user, tkt)
 			if err != nil {
-				return nil, err
+				glog.Errorf("unable to create ticket mount: %v", err)
+			} else {
+				mounts = append(mounts, *tktMount)
 			}
-			mounts = append(mounts, *tktMount)
 		}
 	}
 	return mounts, nil
