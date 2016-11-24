@@ -61,6 +61,7 @@ import (
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	"k8s.io/kubernetes/pkg/securitycontext"
 	kubetypes "k8s.io/kubernetes/pkg/types"
+	kexec "k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/util/oom"
 	"k8s.io/kubernetes/pkg/util/procfs"
@@ -1725,6 +1726,33 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 		err = addNDotsOption(containerInfo.ResolvConfPath)
 		if err != nil {
 			return kubecontainer.ContainerID{}, fmt.Errorf("addNDotsOption: %v", err)
+		}
+	}
+
+	// for non-infra containers with ts/user specified, we create a subdirectory under /sys/fs/cgroup/docker/<id>/<user>
+	// such that ts users can control cgroups
+	if container.Name != PodInfraContainerName {
+		if tsUser, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+			cgroupPath := fmt.Sprintf("/sys/fs/cgroup/cpu/docker/%v/%v", id.ID, tsUser)
+			glog.V(5).Infof("need to create cgroup under container %v for user %v at %v", id.ID, tsUser, cgroupPath)
+			exe := kexec.New()
+			out, err := exe.Command("mkdir", cgroupPath).CombinedOutput()
+			if err != nil {
+				glog.V(5).Infof("error mkdir %v: %v", cgroupPath, out)
+			}
+			out, err = exe.Command("chown", "-R", tsUser+":twosigma", cgroupPath).CombinedOutput()
+			if err != nil {
+				glog.V(5).Infof("error chown %v: %v", cgroupPath, out)
+			}
+			out, err = exe.Command("chmod", "-R", "664", cgroupPath).CombinedOutput()
+			if err != nil {
+				glog.V(5).Infof("error chmod %v: %v", cgroupPath, out)
+			}
+			out, err = exe.Command("chmod", "775", cgroupPath).CombinedOutput()
+			if err != nil {
+				glog.V(5).Infof("error chmod %v: %v", cgroupPath, out)
+			}
+
 		}
 	}
 
