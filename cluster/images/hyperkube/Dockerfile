@@ -46,6 +46,17 @@ COPY static-pods/master.json \
      static-pods/kube-proxy.json \
         /etc/kubernetes/manifests/
 
+# TS fake gss-token encryptor/decryptor and add fake user and group
+COPY gss-token /usr/local/bin/
+RUN mkdir -p /home/tsk8s/tickets/@N.TWOSIGMA.COM
+RUN echo 'blah' > /home/tsk8s/tickets/@N.TWOSIGMA.COM/tsuser
+RUN chmod uog+x /usr/local/bin/gss-token
+RUN useradd -ms /bin/bash tsuser
+RUN groupadd twosigma
+
+# TODO: Move out kube-proxy to a DaemonSet again
+COPY static-pods/kube-proxy.json /etc/kubernetes/manifests/
+
 # Manifests for the docker-multinode guide
 COPY static-pods/master-multi.json \
      static-pods/addon-manager-multinode.json \
