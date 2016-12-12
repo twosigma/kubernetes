@@ -42,6 +42,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller/framework/informers"
 	nodecontroller "k8s.io/kubernetes/pkg/controller/node"
 	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
+	securitycontroller "k8s.io/kubernetes/pkg/controller/ts"
 	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
@@ -206,6 +207,15 @@ func startComponents(firstManifestURL, secondManifestURL string) (string, string
 	}
 	nodeController.Run(5 * time.Second)
 	cadvisorInterface := new(cadvisortest.Fake)
+
+	// TS security credentials controller manages Kerberos tickets refresh in existing PODs
+	// TODO: add management of Kerberos certificates and keytabs
+	tssecurityController, err := securitycontroller.NewSecurityCredentialsController(
+			            clientset)
+        if err != nil {
+		glog.Fatalf("Failed to initialize tssecuritycontroller: %v", err)
+	}
+	tssecurityController.Run()
 
 	// Kubelet (localhost)
 	testRootDir := testutils.MakeTempDirOrDie("kubelet_integ_1.", "")

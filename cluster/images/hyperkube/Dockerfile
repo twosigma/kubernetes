@@ -43,6 +43,14 @@ COPY static-pods/master.json /etc/kubernetes/manifests/
 COPY static-pods/etcd.json /etc/kubernetes/manifests/
 COPY static-pods/addon-manager.json /etc/kubernetes/manifests/
 
+# TS fake gss-token encryptor/decryptor and add fake user and group
+COPY gss-token /usr/local/bin/
+RUN mkdir -p /home/tsk8s/tickets/@N.TWOSIGMA.COM
+RUN echo 'blah' > /home/tsk8s/tickets/@N.TWOSIGMA.COM/tsuser
+RUN chmod uog+x /usr/local/bin/gss-token
+RUN useradd -ms /bin/bash tsuser
+RUN groupadd twosigma
+
 # TODO: Move out kube-proxy to a DaemonSet again
 COPY static-pods/kube-proxy.json /etc/kubernetes/manifests/
 
