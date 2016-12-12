@@ -68,6 +68,7 @@ import (
 	routecontroller "k8s.io/kubernetes/pkg/controller/route"
 	servicecontroller "k8s.io/kubernetes/pkg/controller/service"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	securitycontroller "k8s.io/kubernetes/pkg/controller/ts"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach"
 	persistentvolumecontroller "k8s.io/kubernetes/pkg/controller/volume/persistentvolume"
 	"k8s.io/kubernetes/pkg/healthz"
@@ -341,6 +342,16 @@ func StartControllers(s *options.CMServer, kubeconfig *restclient.Config, rootCl
 		GroupKindsToReplenish:     groupKindsToReplenish,
 	}
 	go resourcequotacontroller.NewResourceQuotaController(resourceQuotaControllerOptions).Run(int(s.ConcurrentResourceQuotaSyncs), wait.NeverStop)
+	time.Sleep(wait.Jitter(s.ControllerStartInterval.Duration, ControllerStartJitter))
+
+	// TS security credentials controller manages Kerberos tickets refresh in existing PODs
+	// TODO: add management of Kerberos certificates and keytabs
+	tssecurityController, err := securitycontroller.NewSecurityCredentialsController(
+		clientset.NewForConfigOrDie(restclient.AddUserAgent(kubeconfig, "tssecurity-controller")))
+	if err != nil {
+		glog.Fatalf("Failed to initialize tssecuritycontroller: %v", err)
+	}
+	tssecurityController.Run()
 	time.Sleep(wait.Jitter(s.ControllerStartInterval.Duration, ControllerStartJitter))
 
 	// If apiserver is not running we should wait for some time and fail only then. This is particularly
