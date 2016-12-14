@@ -13,9 +13,8 @@ import (
         "k8s.io/kubernetes/pkg/util/wait"
 )
 
-// TODO: adjust to a longer interval, this is for initial test only
 const (
-        allowedTktAgeMinutes = time.Duration(1) * time.Minute
+        allowedTktAgeMinutes = time.Duration(60) * time.Minute
 )
 
 type SecurityCredentialsController struct {
