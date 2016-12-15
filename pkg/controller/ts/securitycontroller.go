@@ -34,11 +34,14 @@ func NewSecurityCredentialsController(
 func (sc *SecurityCredentialsController) Run() {
         glog.Infof("Starting TS Security Credentials Controller")
         defer utilruntime.HandleCrash()
-        // keep track whether it is a first run after restart, if so then refresh all of the tickets
-        // on subsequent runs only the tickets which were modified in the last interval are refreshed
-        var firstRun bool
-        firstRun = true
+        // keep track of the last time the ticket check was performed so each time the check runs
+        // only the tickets for which the modification timestamp is after the last run are refreshed
+        // ideally, the ticket refresh process on K8s master nodes should be staggered as to spread the
+        // refreshes over time
+        lastRunTime := time.Time{}
         go wait.Until(func() {
+                var modTime time.Time
+                curRunTime := time.Now()
                 glog.V(2).Infof("check for Kerberos tickets that need a refresh")
                 // TODO: this could be improved by creating selector for List to only return
                 // PODs with the ts/ticket annotation. Could not find a good example, yet.
@@ -57,7 +60,8 @@ func (sc *SecurityCredentialsController) Run() {
                                    glog.Errorf("fatal error when trying to check ticket file mod date %v", err)
                                 }
                              } else {
-                                if tktAge := time.Now().Sub(fileInfo.ModTime()); (tktAge <= sc.allowedTktAgeMinutes) || firstRun {
+                                modTime = fileInfo.ModTime()
+                                if modTime.After(lastRunTime) || modTime.Equal(lastRunTime) {
                                    glog.V(2).Infof("ticket for user %s@%s was updated since last run, refreshing it", user, realm)
                                    dest := pod.Spec.NodeName
                                    env := fmt.Sprintf("KRB5CCNAME=%s", tktPath)
@@ -81,14 +85,14 @@ func (sc *SecurityCredentialsController) Run() {
                                       glog.V(5).Infof("updated POD %s", pod.Name)
                                    }
                                 } else {
-                                   glog.V(5).Infof("ticket for user %s@%s does not require a refresh",user, realm, tktAge)
+                                   glog.V(5).Infof("ticket for user %s@%s does not require a refresh",user, realm)
                                 }
                              }
                           }
                        }
                    }
                 }
-                firstRun = false
+                lastRunTime = curRunTime
         }, sc.allowedTktAgeMinutes, wait.NeverStop)
         glog.V(2).Infof("TS Security Credentials Controller exited")
 }
