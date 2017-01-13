@@ -160,12 +160,15 @@ const (
 
 	// Minimum number of dead containers to keep in a pod
 	minDeadContainerInPod = 1
+
+	// user that we want to own Kerberos keytab file
+	keytabOwner = "tsk8s"
 )
 
 // SyncHandler is an interface implemented by Kubelet, for testability
 type SyncHandler interface {
 	HandlePodAdditions(pods []*api.Pod)
-	HandlePodUpdates(pods []*api.Pod)
+	HandlePodUpdates(pods []*api.Pod, isDelete bool)
 	HandlePodRemoves(pods []*api.Pod)
 	HandlePodReconcile(pods []*api.Pod)
 	HandlePodSyncs(pods []*api.Pod)
@@ -1201,7 +1204,7 @@ func (kl *Kubelet) getActivePods() []*api.Pod {
 }
 
 // makeMounts determines the mount points for the given container.
-func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName, hostDomain, podIP string, podVolumes kubecontainer.VolumeMap) ([]kubecontainer.Mount, error) {
+func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName, hostDomain, podIP string, podVolumes kubecontainer.VolumeMap, clusterDomain string) ([]kubecontainer.Mount, error) {
 	// Kubernetes only mounts on /etc/hosts if :
 	// - container does not use hostNetwork and
 	// - container is not an infrastructure(pause) container
@@ -1259,7 +1262,152 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 			}
 		}
 	}
+
+	// Register in KDC under the DNS name as a singleton Pod cluster, create bind-mount for the keytab, and trigger the keytab fetch
+	glog.V(5).Infof("POD info 1: %s | %s | %s", pod.Spec.Hostname, pod.ObjectMeta.Name, pod.ObjectMeta.Namespace)
+	glog.V(5).Infof("POD info 2: hostName %s hostDomain %s podIP %s clusterDomain %s", hostName, hostDomain, podIP, clusterDomain)
+	if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+		if services, ok := pod.ObjectMeta.Annotations["ts/services"]; ok {
+		   if len(podIP) > 0 {
+		      glog.V(4).Infof("creating keytab for the singleton POD cluster for user %s and services %+v", user, services)
+		      tktMount, err := makeKeytabMount(podDir, clusterDomain, pod, services, hostName)
+		      if err != nil {
+			glog.Errorf("unable to create keytab mount: %v", err)
+		      } else {
+			mounts = append(mounts, *tktMount)
+		      }
+		   } else {
+		      glog.V(5).Infof("invoked without podIP - skipping")
+		   }
+		}
+	}
+
 	return mounts, nil
+}
+
+// exporting to enable REST server to have access to the cluster domain for Kerberos keytab extraction and split
+func (kl *Kubelet) GetClusterDomain() string {
+     return kl.clusterDomain
+}
+
+func makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName string) (*kubecontainer.Mount, error) {
+	keytabFilePath := path.Join(podDir, "keytabs")
+	if err := createKeytab(keytabFilePath, clusterDomain, pod, services, hostName); err != nil {
+		return nil, err
+	}
+	return &kubecontainer.Mount{
+		Name:          "ts-keytab",
+		ContainerPath: "/var/spool/keytabs",
+		HostPath:      keytabFilePath,
+		ReadOnly:      false,
+	}, nil
+}
+
+func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName string) error {
+        // Register the singleton cluster for the POD in the KDC
+	podClusterName :=  getPodKDCClusterName(pod, clusterDomain)
+	if err := registerClusterInKDC(podClusterName); err != nil {
+	   glog.Errorf("error registering cluster %s in KDC, error: %v", podClusterName, err)
+	   return err
+	}
+	// Add node to the virtual cluster of the Pod in KDC
+	if err := addHostToClusterInKDC(podClusterName, hostName); err != nil {
+	   glog.Errorf("error adding host %s to cluster %s in KDC, error: %v", hostName, podClusterName, err)
+	   return err
+	}
+	// Refresh the actual keytab file on the node. The content relevant to this Pod will be extracted
+	// and copied to the Pod directory (for bind-mount) based on krb5_keytab callback invoking
+	// REST API of the kubelet at URL/refreshkeytabs.
+	if err := refreshKeytab(podClusterName, services); err != nil {
+	   glog.Errorf("error getting keytab file for cluster %s and services %+v, error: %v", podClusterName, services, err)
+	   return err
+	}
+	// At this point, when the refresh returned sucessfully, the keytab callback has happened and the content
+	// was extracted and placed into the Pod's folder. It is safe to proceed with provisioning.
+        return nil
+}
+
+// remove node from all virtual clusters this POD was member of unless other PODs from these clusters exist on the node
+func deleteKeytab(dest, userName, clusterDomain, podIP, services string, clusters []string, hostName string) error {
+     // TODO: implement logic to figure out if this POD is the last one from a given cluster on this node
+     return nil
+}
+
+func registerClusterInKDC(clusterName string) error {
+     if out, err := runCommand("/usr/bin/krb5_admin", "create_logical_host", clusterName); err != nil {
+	if !strings.Contains(err.Error(),"already exists") {
+	   glog.Errorf("error registering cluster %s in KDC, error: %v, output: %v", clusterName, err, string(out))
+	   return err
+        } else {
+           glog.V(2).Infof("cluster %s is already in the KDC, not added", clusterName)
+        }
+     } else {
+        glog.V(5).Infof("cluster %s was added to the KDC with output %s", clusterName, string(out))
+     }
+     return nil
+}
+
+func addHostToClusterInKDC(clusterName, hostName string) error {
+     if out, err := runCommand("/usr/bin/krb5_admin", "insert_hostmap", clusterName, hostName); err != nil {
+	if !strings.Contains(err.Error(),"is already in cluster") {
+	   glog.Errorf("error adding host %s to cluster %s in KDC, error: %v, output: %v", hostName, clusterName, err, string(out))
+	   return err
+	} else {
+           glog.V(2).Infof("host %s is already in the cluster %s, not added (unexpected)", hostName, clusterName)
+	}
+	glog.Errorf("error registering cluster %s in KDC, error: %v, output: %v", clusterName, err, string(out))
+	return err
+     } else {
+        glog.V(5).Infof("host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
+     }
+     return nil
+}
+
+func removeHostFromClusterInKDC(clusterName, hostName string) error {
+     if out, err := runCommand("/usr/bin/krb5_admin", "remove_hostmap", clusterName, hostName); err != nil {
+	glog.Errorf("error removing host %s from cluster %s in KDC, error: %v, output: %v", hostName, clusterName, err, string(out))
+	return err
+     } else {
+       glog.V(5).Infof("removeHostFromClusterInKDC() returned output %s with no error", string(out))
+       return nil
+     }
+}
+
+func refreshKeytab(clusterName, services string) error {
+     // Pull the actual keytab for requested services to the node.
+     // Services is a comma-separated list of services to include in the ticket. It is passed from
+     // the manifest annotation.
+     for _, srv := range strings.Split(services,",") {
+         // for each principal we need to create an ACL file in order to be able to request it as another user
+	 data := []byte(keytabOwner + " N.TWOSIGMA.COM " + srv + " " + clusterName)
+	 if err := ioutil.WriteFile("/etc/krb5/krb5_keytab.service2user.d/" + srv + "-" + clusterName, data, 0664); err != nil {
+           glog.Errorf("can not create ACL file for service %s in cluster %s, error: %v", srv, clusterName, err)
+	   return err
+	 } else {
+           glog.V(5).Infof("ACL file for service %s in cluster %s has been created", srv, clusterName)
+	 }
+	 // request the keytab refresh
+         if out, err := runCommand("/usr/sbin/krb5_keytab", "-p", keytabOwner, srv + "/" + clusterName); err != nil {
+            glog.Errorf("error creating service key for service %s in cluster %s, error: %v, output: %v", srv, clusterName, err, string(out))
+            return err
+         } else {
+            glog.V(5).Infof("keytabfile content has been fetched for principal %s/%s, returned output %s with no error", srv, clusterName, string(out))
+         }
+     }
+     return nil
+}
+
+func runCommand(cmdToExec string, params ...string) ([] byte, error) {
+     glog.V(5).Infof("will exec %s %+v", cmdToExec, params)
+     exe := utilexec.New()
+     cmd := exe.Command(cmdToExec, params...)
+     env := "KRB5_KTNAME=/var/spool/keytabs/tsk8s"
+     cmd.SetEnv([]string{env})
+     return cmd.CombinedOutput()
+}
+
+func getPodKDCClusterName(pod *api.Pod, clusterDomain string) string {
+     return pod.Name + "." + pod.Namespace + ".pods." + clusterDomain
 }
 
 func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
@@ -1476,8 +1624,10 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 			return nil, err
 		}
 	}
+	glog.V(5).Infof("Kubelet hostname %s and nodename %s", kl.hostname, kl.nodeName)
 
-	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
+	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, kl.hostname, hostDomainName, podIP, volumes,
+		     kl.clusterDomain)
 	if err != nil {
 		return nil, err
 	}
@@ -2405,7 +2555,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			handler.HandlePodAdditions(u.Pods)
 		case kubetypes.UPDATE:
 			glog.V(2).Infof("SyncLoop (UPDATE, %q): %q", u.Source, format.PodsWithDeletiontimestamps(u.Pods))
-			handler.HandlePodUpdates(u.Pods)
+			handler.HandlePodUpdates(u.Pods, false)
 		case kubetypes.REMOVE:
 			glog.V(2).Infof("SyncLoop (REMOVE, %q): %q", u.Source, format.Pods(u.Pods))
 			handler.HandlePodRemoves(u.Pods)
@@ -2415,7 +2565,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 		case kubetypes.DELETE:
 			glog.V(2).Infof("SyncLoop (DELETE, %q): %q", u.Source, format.Pods(u.Pods))
 			// DELETE is treated as a UPDATE because of graceful deletion.
-			handler.HandlePodUpdates(u.Pods)
+			handler.HandlePodUpdates(u.Pods, true)
 		case kubetypes.SET:
 			// TODO: Do we want to support this?
 			glog.Errorf("Kubelet does not support snapshot update")
@@ -2440,7 +2590,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			}
 		}
 
-		if e.Type == pleg.ContainerDied {
+	if e.Type == pleg.ContainerDied {
 			if containerID, ok := e.Data.(string); ok {
 				kl.cleanUpContainersInPod(e.ID, containerID)
 			}
@@ -2554,12 +2704,39 @@ func (kl *Kubelet) HandlePodAdditions(pods []*api.Pod) {
 
 // HandlePodUpdates is the callback in the SyncHandler interface for pods
 // being updated from a config source.
-func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
+func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod, isDelete bool) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
-		if tkt, ok := pod.ObjectMeta.Annotations["ts/ticket"]; ok {
-		   if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+	        if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+		   if tkt, ok := pod.ObjectMeta.Annotations["ts/ticket"]; ok {
 		      kl.refreshTSTkt(pod, user, tkt)
+		   }
+		   if services, ok := pod.ObjectMeta.Annotations["ts/services"]; ok {
+		      // TODO: check if we can optimize by comparing with the old version of the required services,
+		      // i.e., if the list has not changed no need to do this.
+		      // NOTE: We assume that the pod name can not change, so no re-registration in KDC is done here. That needs
+		      // to be verified.
+		      podClusterName :=  getPodKDCClusterName(pod, kl.clusterDomain)
+		      if isDelete {
+		         // Remove the node from the KDC cluster of the Pod. No removal of actual singleton cluster
+			 // is done since the krb5_* software suite does not provide for that at the moment. The cleanup
+			 // aspect should be revisited since a large number of empty singleton clusters can build up in KDC.
+	                 if err := removeHostFromClusterInKDC(podClusterName, kl.hostname); err != nil {
+			    glog.V(2).Infof("Failed to remove host %s from KDC cluster %s for pod %q during Pod update for delete, err: %v",
+					kl.hostname, podClusterName, format.Pod(pod), err)
+			 } else {
+		            glog.V(5).Infof("Removed host %s from KDC cluster %s for pod %q during Pod update for delete",
+					kl.hostname, podClusterName, format.Pod(pod))
+		         }
+		      } else { // it is a normal update, not a graceful delete
+		        if err := refreshKeytab(podClusterName, services); err != nil {
+                           glog.Errorf("error getting keytab file (during Pod update) for cluster %s and services %+v, error: %v",
+                               podClusterName, services, err)
+                        } else {
+			    glog.V(5).Infof("Updated keytab file (during Pod update) for cluster %s and services %+v for POD %q",
+                                      podClusterName, services, format.Pod(pod))
+		        }
+		      }
 		   }
 		}
 		kl.podManager.UpdatePod(pod)
@@ -2579,7 +2756,16 @@ func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
 func (kl *Kubelet) HandlePodRemoves(pods []*api.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
-		kl.podManager.DeletePod(pod)
+	        // Remove this node from Pod's singleton cluster
+	        podClusterName :=  getPodKDCClusterName(pod, kl.clusterDomain)
+	        if err := removeHostFromClusterInKDC(podClusterName, kl.hostname); err != nil {
+			glog.V(2).Infof("Failed to remove host %s from KDC cluster %s for pod %q, err: %v",
+					kl.hostname, podClusterName, format.Pod(pod), err)
+		} else {
+                        glog.V(5).Infof("Removed host %s from KDC cluster %s for pod %q",
+					kl.hostname, podClusterName, format.Pod(pod))
+		}
+	        kl.podManager.DeletePod(pod)
 		if kubepod.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)
 			continue

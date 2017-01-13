@@ -17,14 +17,21 @@ limitations under the License.
 package server
 
 import (
+        "bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
+	"os"
+	"os/exec"
+	"path"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +60,7 @@ import (
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/configz"
+	utilexec "k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/flushwriter"
 	"k8s.io/kubernetes/pkg/util/httpstream"
 	"k8s.io/kubernetes/pkg/util/httpstream/spdy"
@@ -176,6 +184,8 @@ type HostInterface interface {
 	RootFsInfo() (cadvisorapiv2.FsInfo, error)
 	ListVolumesForPod(podUID types.UID) (map[string]volume.Volume, bool)
 	PLEGHealthCheck() (bool, error)
+	GetPodDir(podUID types.UID) string
+	GetClusterDomain() string
 }
 
 // NewServer initializes and configures a kubelet.Server object to handle HTTP requests.
@@ -269,6 +279,17 @@ func (s *Server) InstallDefaultHandlers() {
 		To(s.getSpec).
 		Operation("getSpec").
 		Writes(cadvisorapi.MachineInfo{}))
+	s.restfulCont.Add(ws)
+
+	// A handle to refresh Kerberos keytabs.
+	// It gets invoked by krb5_keytab callback utility
+	// each time the underlying keytab file on the host
+	// has been updated.
+	ws = new(restful.WebService)
+	ws.
+		Path("/refreshkeytabs")
+	ws.Route(ws.POST("").
+		To(s.refreshKeytabs))
 	s.restfulCont.Add(ws)
 }
 
@@ -502,6 +523,10 @@ func (s *Server) getContainerLogs(request *restful.Request, response *restful.Re
 	}
 }
 
+type test_struct struct {
+     path string
+}
+
 // encodePods creates an api.PodList object from pods and returns the encoded
 // PodList.
 func encodePods(pods []*api.Pod) (data []byte, err error) {
@@ -515,6 +540,193 @@ func encodePods(pods []*api.Pod) (data []byte, err error) {
 	codec := api.Codecs.LegacyCodec(unversioned.GroupVersion{Group: api.GroupName, Version: "v1"})
 	return runtime.Encode(codec, podList)
 }
+
+// Refreshes keytabs for all containers using them. The keytab file content, which contains
+// principals for all PODs on this node, gets split into parts and propagated into respective
+// POD keytab files.
+func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Response) {
+	var lastError error
+	response.AddHeader("Content-Type", "text/plain")
+        if body, err := ioutil.ReadAll(request.Request.Body); err != nil {
+          glog.Errorf("failed while reading POST body: %v", err)
+	   response.WriteErrorString(http.StatusInternalServerError, err.Error())
+	   return
+	} else {
+	   values, errParse := url.ParseQuery(string(body))
+	   if errParse != nil {
+	      glog.Errorf("failed while parsing the POST body: %v", errParse)
+	      response.WriteErrorString(http.StatusInternalServerError, errParse.Error())
+	      return
+	   }
+	   keytabFile := values["keytabpath"][0]
+	   glog.V(2).Infof("Keytab file (to be distributed to containers) is %s", keytabFile)
+	   pods := s.host.GetPods()
+	   for _, pod := range pods {
+	       if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+		  if services, ok := pod.ObjectMeta.Annotations["ts/services"]; ok {
+		     // extract from global keytab file the parts relevant to this POD
+		     if err := s.refreshKeytab(keytabFile, pod, user, services); err != nil {
+                        glog.Errorf("keytab refresh for pod %s failed: %v", pod.Name, err)
+			lastError = err
+		     }
+		  }
+	       }
+	   }
+	   if lastError != nil {
+	      response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
+	   }
+	}
+}
+
+func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, services string) error {
+     // extract part of the keytab file that contains data related to this Pod
+     // the only way to do it using ktutil is to make a copy of the master file
+     // and remove all of the entries that are not needed
+
+     podDir := s.host.GetPodDir(pod.UID)
+
+     file, err := ioutil.TempFile(os.TempDir(), "k8s-keytab")
+     if err != nil {
+        glog.Errorf("failed to create temp file: %v", err)
+	return err
+     }
+     tmpFile := file.Name()
+     defer os.Remove(tmpFile)
+
+     fileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
+     if err != nil {
+        glog.Errorf("failed to create output temp file: %v", err)
+	return err
+     }
+     tmpFileOut := fileOut.Name()
+     defer os.Remove(tmpFileOut)
+
+     podClusterName := pod.Name + "." + pod.Namespace + ".pods." + s.host.GetClusterDomain()
+
+     //generate cartesian product of services and cluster name
+     principals := map[string]bool{}
+     for _, srv := range strings.Split(services,",") {
+         principals[srv + "/" + podClusterName + "@N.TWOSIGMA.COM"] = true
+     }
+
+     glog.V(5).Infof("Refreshing keytab for POD %s with clusterName %s podDir %s for user %s and services %+v principals %+v",
+             pod.Name, podClusterName, podDir, userName, services, principals)
+
+     if out, err := runCommand("/bin/cp", "-f", keytabFile , tmpFile); err != nil {
+        glog.Errorf("error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
+        return err
+     }
+
+     if err := extractKeytab(tmpFile, tmpFileOut, principals); err != nil {
+        glog.Errorf("Extraction of principals from keytab %s for pod %s failed, error: %v", tmpFile, pod.Name, err)
+	return err
+     }
+
+     // create the Pod directory - we need to do it since we docker was not invoked yet
+     // TODO: analyze if we can do it after the creation succeeded at the container
+     // runtime level.
+     podKeytabDirectory := path.Join(podDir, "keytabs")
+     exe := utilexec.New()
+     cmd := exe.Command(
+	   "mkdir",
+	   "-p",
+	   podKeytabDirectory)
+     if out, err := cmd.CombinedOutput(); err != nil {
+         glog.Errorf("unable to create Pod keytab directory: %s %v", out, err)
+     } else {
+         glog.V(2).Infof("Pod's keytab directory has been created at %s %s",podKeytabDirectory, out)
+     }
+
+     // copy the extracted part of the keytab to the container's keytab directory
+     podKeytabFile := path.Join(podDir, "keytabs", userName)
+     exe = utilexec.New()
+     cmd = exe.Command(
+			"/bin/cp",
+		        "-f",
+                        tmpFileOut,
+		        podKeytabFile)
+     if out, err := cmd.CombinedOutput(); err != nil {
+        glog.Errorf("unable to copy the extracted keytab for user %s from tmpFile %s to destination %s: %s %v",
+			    userName, tmpFile, podKeytabFile, out, err)
+	return err
+     } else {
+        glog.V(2).Infof("keytab has been refreshed at %s %s", podKeytabFile, out)
+     }
+     return nil
+}
+
+func extractKeytab(keytabFilename, keytabFilenameOut string, principals map[string]bool) error {
+     outb, errb := execWithPipe("printf", "kutil", "rkt " + keytabFilename + "\nlist\nq\n")
+     if errb.Len() > 0 {
+        glog.Errorf("unable to list keys in keytab file %s, output %v, error %v", keytabFilename, outb, errb)
+	return errors.New(outb.String() + " " + errb.String())
+     }
+
+     re := regexp.MustCompile("  +")
+     keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
+     toRemove := "rkt " + keytabFilename + "\n"
+     for c := len(keyArray)-1; c>=0; c-- {
+         key := strings.Trim(keyArray[c], " ")
+	 // skip header outputed by the ktutil
+	 if c < 4 {
+	    continue
+	 }
+	 items := strings.Split(key, " ")
+	 // skip irrelevant parts of the klist output
+	 if len(items) != 3 {
+	    continue
+	 }
+	 if !principals[items[2]] {
+	    toRemove = toRemove + "delent " + items[0] + "\n"
+	 }
+     }
+     toRemove = toRemove + "wkt " + keytabFilenameOut + "\nq\n"
+     glog.V(4).Infof("keytab extraction string to be executed: %s", toRemove)
+
+     outb, errb = execWithPipe("printf", "kutil", toRemove)
+     if errb.Len() > 0 {
+        glog.Errorf("unable to remove keys from keytab file %s and write to keytab file %s, output %v, error %v",
+			    keytabFilename, keytabFilenameOut, outb.String(), errb.String())
+	return errors.New(outb.String() + " " + errb.String())
+     }
+     glog.V(4).Infof("extraction complete")
+     return nil
+}
+
+func execWithPipe(cmd1Str, cmd2Str string, par... string) (bytes.Buffer, bytes.Buffer) {
+     var o, e bytes.Buffer
+
+     r,w := io.Pipe()
+
+     cmd1 := exec.Command(cmd1Str, par...)
+     cmd2 := exec.Command(cmd2Str)
+
+     cmd1.Stdout = w
+     cmd2.Stdin = r
+     cmd2.Stdout = &o
+     cmd2.Stderr = &e
+
+     cmd1.Start()
+     cmd2.Start()
+
+     go func() {
+        defer w.Close()
+	cmd1.Wait()
+     }()
+     cmd2.Wait()
+
+     return o,e
+}
+
+func runCommand(cmdToExec string, params ...string) ([] byte, error) {
+     glog.V(5).Infof("will exec %s %+v", cmdToExec, params)
+     exe := utilexec.New()
+     cmd := exe.Command(cmdToExec, params...)
+     env := "KRB5_KTNAME=/var/spool/keytabs/tsk8s"
+     cmd.SetEnv([]string{env})
+     return cmd.CombinedOutput()
+}
+
 
 // getPods returns a list of pods bound to the Kubelet and their spec.
 func (s *Server) getPods(request *restful.Request, response *restful.Response) {
