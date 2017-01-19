@@ -715,7 +715,7 @@ func TestMakeVolumeMounts(t *testing.T) {
 		},
 	}
 
-	mounts, _ := makeMounts(&pod, "/pod", &container, "fakepodname", "", "", podVolumes)
+	mounts, _ := makeMounts(&pod, "/pod", &container, "fakepodname", "", "", podVolumes, "cluster.local")
 
 	expectedMounts := []kubecontainer.Mount{
 		{

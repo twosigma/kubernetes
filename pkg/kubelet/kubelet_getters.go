@@ -46,6 +46,11 @@ func (kl *Kubelet) getPodsDir() string {
 	return path.Join(kl.getRootDir(), options.DefaultKubeletPodsDirName)
 }
 
+// exported version of the get method
+func (kl *Kubelet) GetPodsDir() string {
+     return kl.getPodsDir()
+}
+
 // getPluginsDir returns the full path to the directory under which plugin
 // directories are created.  Plugins can use these directories for data that
 // they need to persist.  Plugins should create subdirectories under this named

@@ -336,6 +336,17 @@ func (kd *KubeDNS) newPod(obj interface{}) {
 		kd.cacheLock.Lock()
 		defer kd.cacheLock.Unlock()
 		kd.cache.setEntry(p.Name, recordValue, fqdn, cachePath...)
+		// Additionally, if runAsUser was set, create another DNS record for the hostname prefixed with the username 
+		if runAsUsername, ok  := p.ObjectMeta.Annotations["ts/runasusername"]; ok {
+			glog.V(0).Infof("runAsUser %s provided for pod %s, adding additional DNS entry", runAsUsername, p.Name)
+			cachePath = append(cachePath, p.Name)
+			domainLabels := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name, runAsUsername)
+			fqdn := dns.Fqdn(strings.Join(reverseArray(domainLabels), "."))
+			kd.cache.setEntry(runAsUsername, recordValue, fqdn, cachePath...)
+		} else {
+			glog.V(0).Infof("runAsUser not provided for pod %s", p.Name)
+		}
+
 	}
 }
 
