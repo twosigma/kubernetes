@@ -116,6 +116,14 @@ func (fk *fakeKubelet) GetHostname() string {
 	return fk.hostnameFunc()
 }
 
+func (fk *fakeKubelet) GetPodDir(podUID types.UID) string {
+     return "/fakePoddir"
+}
+
+func (fk *fakeKubelet) GetClusterDomain() string {
+     return "cluster.local"
+}
+
 func (fk *fakeKubelet) RunInContainer(podFullName string, uid types.UID, containerName string, cmd []string) ([]byte, error) {
 	return fk.runFunc(podFullName, uid, containerName, cmd)
 }
