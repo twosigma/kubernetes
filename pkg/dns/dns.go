@@ -50,6 +50,11 @@ const (
 	// A subdomain added to the user specified dmoain for all pods.
 	podSubdomain = "pod"
 
+	// Additional subdomain for pods so they can be addressed by name instead of IP with dashes.
+	// Pods can be addressed as <pod-name>.<namespace>.pods.<cluster-domain> in addition to the
+	// default <pod-ip-with-dashes>.<namespace>.pod.<cluster-domain>.
+        namedPodsSubdomain = "pods"
+
 	// arpaSuffix is the standard suffix for PTR IP reverse lookups.
 	arpaSuffix = ".in-addr.arpa."
 
@@ -87,6 +92,9 @@ type KubeDNS struct {
 	// A cache that contains all the services in the system.
 	servicesStore kcache.Store
 
+	// A cache that contains all the Pods in the system.
+	podsStore kcache.Store
+
 	// stores DNS records for the domain.
 	// A Records and SRV Records for (regular) services and headless Services.
 	// CNAME Records for ExternalName Services.
@@ -115,6 +123,9 @@ type KubeDNS struct {
 
 	// serviceController invokes registered callbacks when services change.
 	serviceController *kcache.Controller
+
+	// podController invokes registered callbacks when PODs change.
+	podsController *kcache.Controller
 
 	// Map of federation names that the cluster in which this kube-dns is running belongs to, to
 	// the corresponding domain names.
@@ -147,12 +158,14 @@ func NewKubeDNS(client clientset.Interface, domain string, federations map[strin
 	}
 	kd.setEndpointsStore()
 	kd.setServicesStore()
+	kd.setPodsStore()
 	return kd, nil
 }
 
 func (kd *KubeDNS) Start() {
 	go kd.endpointsController.Run(wait.NeverStop)
 	go kd.serviceController.Run(wait.NeverStop)
+	go kd.podsController.Run(wait.NeverStop)
 	// Wait synchronously for the Kubernetes service and add a DNS record for it.
 	// This ensures that the Start function returns only after having received Service objects
 	// from APIServer.
@@ -229,6 +242,27 @@ func (kd *KubeDNS) setEndpointsStore() {
 	)
 }
 
+func (kd *KubeDNS) setPodsStore() {
+	// Returns a cache.ListWatch that gets all changes to PODs.
+	kd.podsStore, kd.podsController = kcache.NewInformer(
+		&kcache.ListWatch{
+			ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+				return kd.kubeClient.Core().Pods(kapi.NamespaceAll).List(options)
+			},
+			WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+				return kd.kubeClient.Core().Pods(kapi.NamespaceAll).Watch(options)
+			},
+		},
+		&kapi.Pod{},
+		resyncPeriod,
+		kcache.ResourceEventHandlerFuncs{
+			AddFunc: kd.newPod,
+			DeleteFunc: kd.removePod,
+			UpdateFunc: kd.updatePod,
+			},
+	)
+}
+
 func assertIsService(obj interface{}) (*kapi.Service, bool) {
 	if service, ok := obj.(*kapi.Service); ok {
 		return service, ok
@@ -289,6 +323,39 @@ func (kd *KubeDNS) updateService(oldObj, newObj interface{}) {
 func (kd *KubeDNS) handleEndpointAdd(obj interface{}) {
 	if e, ok := obj.(*kapi.Endpoints); ok {
 		kd.addDNSUsingEndpoints(e)
+	}
+}
+
+func (kd *KubeDNS) newPod(obj interface{}) {
+	if p, ok := obj.(*kapi.Pod); ok && len(p.Status.PodIP) > 0 {
+		glog.V(4).Infof("Add pod %s with IP %s", p.Name, p.Status.PodIP)
+		recordValue, _ := getSkyMsg(p.Status.PodIP, 0)
+		cachePath := append(kd.domainPath, namedPodsSubdomain, p.Namespace)
+		domainLabels := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name)
+		fqdn := dns.Fqdn(strings.Join(reverseArray(domainLabels), "."))
+		kd.cacheLock.Lock()
+		defer kd.cacheLock.Unlock()
+		kd.cache.setEntry(p.Name, recordValue, fqdn, cachePath...)
+	}
+}
+
+func (kd *KubeDNS) updatePod(oldobj, newobj interface{}) {
+	if _, ok := oldobj.(*kapi.Pod); ok {
+		if newPod, ok := newobj.(*kapi.Pod); ok && len(newPod.Status.PodIP) > 0 {
+			glog.V(4).Infof("Update pod %s with IP %s", newPod.Name, newPod.Status.PodIP)
+			kd.removePod(oldobj)
+			kd.newPod(newobj)
+		}
+	}
+}
+
+func (kd *KubeDNS) removePod(obj interface{}) {
+        if p, ok := obj.(*kapi.Pod); ok {
+                subCachePath := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name)
+		glog.V(4).Infof("Remove pod %s at path %s", p.Name, subCachePath)
+		kd.cacheLock.Lock()
+		defer kd.cacheLock.Unlock()
+		kd.cache.deletePath(subCachePath...)
 	}
 }
 
