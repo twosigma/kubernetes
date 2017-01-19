@@ -19,6 +19,8 @@ package clock
 import (
 	"sync"
 	"time"
+
+	"github.com/golang/glog"
 )
 
 // Clock allows for injecting fake or real clocks into code that
@@ -215,4 +217,11 @@ func (*IntervalClock) Tick(d time.Duration) <-chan time.Time {
 
 func (*IntervalClock) Sleep(d time.Duration) {
 	panic("IntervalClock doesn't implement Sleep")
+}
+
+// utility function to compute function exec time
+// profile execution time of functions
+func ExecTime(start time.Time, function, detail string) {
+	elapsed := time.Since(start)
+	glog.V(4).Infof("exectime of %s was %d ns, detail: %s", function, elapsed.Nanoseconds(), detail)
 }

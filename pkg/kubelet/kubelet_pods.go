@@ -47,7 +47,9 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/clock"
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
+	podutil "k8s.io/kubernetes/pkg/util/pod"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/util/term"
 	utilvalidation "k8s.io/kubernetes/pkg/util/validation"
@@ -97,7 +99,7 @@ func makeDevices(container *api.Container) []kubecontainer.DeviceInfo {
 }
 
 // makeMounts determines the mount points for the given container.
-func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName, hostDomain, podIP string, podVolumes kubecontainer.VolumeMap) ([]kubecontainer.Mount, error) {
+func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName, hostDomain, podIP string, podVolumes kubecontainer.VolumeMap, clusterDomain, nodeHostname string) ([]kubecontainer.Mount, error) {
 	// Kubernetes only mounts on /etc/hosts if :
 	// - container does not use hostNetwork and
 	// - container is not an infrastructure(pause) container
@@ -168,7 +170,134 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 			}
 		}
 	}
+
+	// Register in KDC under the DNS name as a singleton Pod cluster, create bind-mount for the keytab, and trigger the keytab fetch
+	if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
+		if services, ok := pod.ObjectMeta.Annotations["ts/services"]; ok {
+			if realm, ok := pod.ObjectMeta.Annotations["ts/realm"]; ok {
+				if len(podIP) > 0 {
+					glog.V(4).Infof("creating keytab for the singleton POD cluster for user %s and services %+v", user, services)
+					tktMount, err := makeKeytabMount(podDir, clusterDomain, pod, services, nodeHostname, realm)
+					if err != nil {
+						glog.Errorf("unable to create keytab mount: %v", err)
+					} else {
+						mounts = append(mounts, *tktMount)
+					}
+				} else {
+					glog.V(5).Infof("invoked without podIP - skipping")
+				}
+			}
+		}
+	}
+
 	return mounts, nil
+}
+
+func makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName, realm string) (*kubecontainer.Mount, error) {
+	keytabFilePath := path.Join(podDir, "keytabs")
+	if err := createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm); err != nil {
+		return nil, err
+	}
+	return &kubecontainer.Mount{
+		Name:          "ts-keytab",
+		ContainerPath: "/var/spool/keytabs",
+		HostPath:      keytabFilePath,
+		ReadOnly:      false,
+	}, nil
+}
+
+func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string) error {
+	defer clock.ExecTime(time.Now(), "createKeytab", pod.Name)
+	// Register the singleton cluster for the POD in the KDC
+	podClusterName, err := podutil.GetPodKDCClusterName(pod, clusterDomain)
+	if err != nil {
+		glog.V(2).Infof("Failed to get KDC cluster name for the Pod %s, not removing node from the cluster, err: %v",
+			pod.Name, err)
+		return err
+	}
+	if err = registerClusterInKDC(podClusterName); err != nil {
+		glog.Errorf("error registering cluster %s in KDC, error: %v", podClusterName, err)
+		return err
+	}
+	// Add node to the virtual cluster of the Pod in KDC
+	if err := addHostToClusterInKDC(podClusterName, hostName); err != nil {
+		glog.Errorf("error adding host %s to cluster %s in KDC, error: %v", hostName, podClusterName, err)
+		return err
+	}
+	// Refresh the actual keytab file on the node. The content relevant to this Pod will be extracted
+	// and copied to the Pod directory (for bind-mount) based on krb5_keytab callback invoking
+	// REST API of the kubelet at URL/refreshkeytabs.
+	if err := refreshKeytab(podClusterName, services, realm); err != nil {
+		glog.Errorf("error getting keytab file for cluster %s and services %+v, error: %v", podClusterName, services, err)
+		return err
+	}
+	// At this point, when the refresh returned sucessfully, the keytab callback has happened and the content
+	// was extracted and placed into the Pod's folder. It is safe to proceed with provisioning.
+	return nil
+}
+
+// Register the cluster in Kerberos KDC
+func registerClusterInKDC(clusterName string) error {
+	defer clock.ExecTime(time.Now(), "egisterClusterInKDC", clusterName)
+	var lastErr error
+	var lastOut []byte
+	var retry int
+	for retry = 0; retry < maxKrb5RetryCount; retry++ {
+		if out, err := runCommand("/usr/bin/krb5_admin", "create_logical_host", clusterName); err != nil {
+			if !strings.Contains(string(out), "already exists") {
+				lastErr = err
+				lastOut = out
+				glog.Errorf("error registering cluster %s in KDC, will retry %d, error: %v, output: %v",
+					clusterName, retry, err, string(out))
+				time.Sleep(krb5RetrySleepSec)
+			} else {
+				glog.V(4).Infof("cluster %s is already in the KDC, not added", clusterName)
+				return nil
+			}
+		} else {
+			glog.V(5).Infof("cluster %s was added to the KDC with output %s", clusterName, string(out))
+			return nil
+		}
+	}
+	glog.Errorf("error registering cluster %s in KDC after %d retries, giving up, last error: %v, output: %v",
+		clusterName, retry, lastErr, string(lastOut))
+	return lastErr
+}
+
+// Add node on which the kubelet runs to the KDC cluster
+func addHostToClusterInKDC(clusterName, hostName string) error {
+	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName+" "+hostName)
+	var lastErr error
+	var lastOut []byte
+	var retry int
+	for retry = 0; retry < maxKrb5RetryCount; retry++ {
+		if out, err := runCommand("/usr/bin/krb5_admin", "insert_hostmap", clusterName, hostName); err != nil {
+			if !strings.Contains(string(out), "is already in cluster") {
+				lastErr = err
+				lastOut = out
+				glog.Errorf("error adding host %s to cluster %s in KDC, will retry %d, error: %v, output: %v",
+					hostName, clusterName, retry, err, string(out))
+				time.Sleep(krb5RetrySleepSec)
+			} else {
+				glog.V(2).Infof("host %s is already in the cluster %s, not added", hostName, clusterName)
+				return nil
+			}
+		} else {
+			glog.V(5).Infof("host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
+			return nil
+		}
+	}
+	glog.Errorf("error adding host %s to cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
+		hostName, clusterName, retry, lastErr, string(lastOut))
+	return lastErr
+}
+
+func runCommand(cmdToExec string, params ...string) ([]byte, error) {
+	defer clock.ExecTime(time.Now(), "runCommand", cmdToExec)
+	glog.V(4).Infof("will exec %s %+v", cmdToExec, params)
+	exe := utilexec.New()
+	cmd := exe.Command(cmdToExec, params...)
+	return cmd.CombinedOutput()
 }
 
 func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
@@ -341,6 +470,8 @@ func (kl *Kubelet) GeneratePodHostNameAndDomain(pod *api.Pod) (string, string, e
 			hostDomain = fmt.Sprintf("%s.%s.svc.%s", subdomainCandidate, pod.Namespace, clusterDomain)
 		}
 	}
+	// override the hostDomain of the Pod to match the name <pod.Name>.<namespace>.pods.<cluster>
+	hostDomain = podutil.GetPodDomainName(pod, clusterDomain)
 	return hostname, hostDomain, nil
 }
 
@@ -355,14 +486,17 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	if err != nil {
 		return nil, err
 	}
-	opts.Hostname = hostname
+	opts.Hostname = hostname + "." + hostDomainName
 	podName := volumehelper.GetUniquePodName(pod)
 	volumes := kl.volumeManager.GetMountedVolumesForPod(podName)
 
 	opts.PortMappings = makePortMappings(container)
 	opts.Devices = makeDevices(container)
 
-	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
+	glog.V(5).Infof("Kubelet hostname %s and nodename %s", kl.hostname, kl.nodeName)
+
+	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes,
+		kl.clusterDomain, kl.hostname)
 	if err != nil {
 		return nil, err
 	}
