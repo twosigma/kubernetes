@@ -29,6 +29,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/util/exec"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"	
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/metrics"
@@ -123,9 +124,9 @@ func (s *Scheduler) scheduleOne() {
 
 	tokenFile := ""
 	// go with a simple hard coded version as poc
-	if token, ok := assumed.ObjectMeta.Annotations["ts/token"]; ok {
+	if token, ok := assumed.ObjectMeta.Annotations[krbutils.TSTokenAnnotation]; ok {
 		// first we check if "ts/token" is present, if so we decode the token and re-encrypt
-		glog.Infof("got ts/token=%s", token)
+		glog.Infof("got %s=%s", krbutils.TSTokenAnnotation, token)
 
 		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
 		if err != nil {
@@ -133,10 +134,10 @@ func (s *Scheduler) scheduleOne() {
 		} else {
 			tmpFile := file.Name()
 			defer os.Remove(tmpFile)
-			env := "KRB5_KTNAME=/var/spool/keytabs/tsk8s"
+			env := "KRB5_KTNAME=" + krbutils.HostKeytabFile
 			exe := exec.New()
 			cmd := exe.Command(
-				"/usr/local/bin/gss-token",
+				krbutils.GsstokenPath,
 				"-r",
 				"-C",
 				tmpFile)
@@ -156,12 +157,13 @@ func (s *Scheduler) scheduleOne() {
 				}
 			}
 		}
-	} else if user, ok := assumed.ObjectMeta.Annotations["ts/user"]; ok {
+	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
 		// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
-		if realm, ok := assumed.ObjectMeta.Annotations["ts/realm"]; ok {
+		if realm, ok := assumed.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
 			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof("got ts/user=%s, ts/realm=%s, trying to create token from prestashed ticket", user, realm)
-			tktPath := fmt.Sprintf("/home/tsk8s/tickets/@%s/%s", realm, user)
+			glog.Infof("got %s=%s, %s=%s, trying to create token from prestashed ticket",
+				krbutils.TSUserAnnotation, user, krbutils.TSRealmAnnotation, realm)
+			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir + "@%s/%s", realm, user)
 			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
 				glog.Errorf("prestashed ticket for %s@%s does not exist", user, realm)
 			} else {
@@ -174,14 +176,14 @@ func (s *Scheduler) scheduleOne() {
 		env := fmt.Sprintf("KRB5CCNAME=%s", tokenFile)
 		exe := exec.New()
 		cmd := exe.Command(
-			"/usr/local/bin/gss-token",
+			krbutils.GsstokenPath,
 			"-D",
-			fmt.Sprintf("%s@%s", "tsk8s", dest))
+			fmt.Sprintf("%s@%s", krbutils.KeytabOwner, dest))
 		cmd.SetEnv([]string{env})
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			glog.V(5).Infof("token created: %s", out)
-			assumed.ObjectMeta.Annotations["ts/ticket"] = string(out)
+			assumed.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = string(out)
 		} else {
 			glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
 				err, string(out), dest, env)
