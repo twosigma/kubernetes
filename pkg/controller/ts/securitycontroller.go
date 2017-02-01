@@ -10,6 +10,7 @@ import (
         clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
         utilruntime "k8s.io/kubernetes/pkg/util/runtime"
         "k8s.io/kubernetes/pkg/util/exec"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"	
         "k8s.io/kubernetes/pkg/util/wait"
 )
 
@@ -49,8 +50,8 @@ func (sc *SecurityCredentialsController) Run() {
                    glog.Errorf("Error listing PODs: %v", err)
                 } else {
                    for _, pod := range pods.Items {
-                       if user, ok := pod.ObjectMeta.Annotations["ts/user"]; ok {
-                          if realm, ok := pod.ObjectMeta.Annotations["ts/realm"]; ok {
+                       if user, ok := pod.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
+                          if realm, ok := pod.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
                              glog.V(5).Infof("checking ticket for POD %s for user %s@%s", pod.Name, user, realm)
                              tktPath := fmt.Sprintf("/home/tsk8s/tickets/@%s/%s", realm, user)
                              if fileInfo, err := os.Stat(tktPath); err != nil {
@@ -74,7 +75,7 @@ func (sc *SecurityCredentialsController) Run() {
                                    out, err := cmd.CombinedOutput()
                                    if err == nil {
                                       glog.V(5).Infof("token created: %s", out)
-                                      pod.ObjectMeta.Annotations["ts/ticket"] = string(out)
+                                      pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = string(out)
                                    } else {
                                       glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
                                       err, string(out), dest, env)

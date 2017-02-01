@@ -625,6 +625,8 @@ type KubeControllerManagerConfiguration struct {
 	EnableProfiling bool `json:"enableProfiling"`
 	// clusterName is the instance prefix for the cluster.
 	ClusterName string `json:"clusterName"`
+	// clusterDomain is the DNS domain for the cluster.
+	ClusterDomain string `json:"clusterDomain"`
 	// clusterCIDR is CIDR Range for Pods in cluster.
 	ClusterCIDR string `json:"clusterCIDR"`
 	// serviceCIDR is CIDR Range for Services in cluster.

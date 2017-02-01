@@ -26,7 +26,7 @@ import (
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
 	apierrors "k8s.io/kubernetes/pkg/api/errors"
-	podutil "k8s.io/kubernetes/pkg/util/pod"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 )
 
 func init() {
@@ -49,15 +49,21 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 		return apierrors.NewBadRequest("Resource was marked with kind Pod but was unable to be converted")
 	}
 
-	if runAsUserName, err := podutil.GetRunAsUsername(pod); err != nil {
+	if runAsUserName, err := krbutils.GetRunAsUsername(pod); err != nil {
+		namespace := attributes.GetNamespace()
 		glog.Errorf("no runAsUser annotation for pod %s in namespace %s, error is: %+v",
-			attributes.GetName(), attributes.GetNamespace(), err)
-		return admission.NewForbidden(attributes, errors.New("runAsUser is required in the manifest"))
+			attributes.GetName(), namespace, err)
+		if (namespace == "kube-system") || (namespace == "contadm") {
+			glog.V(5).Infof("TSAdmission: admitting system namespace %s", namespace)
+			return nil
+		} else {
+			return admission.NewForbidden(attributes, errors.New("runAsUser is required in the manifest"))
+		}
 	} else {
-		pod.ObjectMeta.Annotations["ts/runasusername"] = runAsUserName
+		pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation] = runAsUserName
 		glog.V(0).Infof(
 			"there is annotation %s for pod %s in namespace %s",
-			pod.ObjectMeta.Annotations["ts/runasusername"],
+			pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation],
 			attributes.GetName(), attributes.GetNamespace())
 		return nil
 	}

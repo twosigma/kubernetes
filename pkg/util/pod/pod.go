@@ -17,12 +17,8 @@ limitations under the License.
 package pod
 
 import (
-	goerrors "errors"
 	"fmt"
 	"hash/adler32"
-	"os/user"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -31,7 +27,6 @@ import (
 	"k8s.io/kubernetes/pkg/api/errors"
 	unversionedcore "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/unversioned"
 	errorsutil "k8s.io/kubernetes/pkg/util/errors"
-	"k8s.io/kubernetes/pkg/util/exec"
 	hashutil "k8s.io/kubernetes/pkg/util/hash"
 	"k8s.io/kubernetes/pkg/util/wait"
 )
@@ -102,40 +97,4 @@ func Filter(podList *api.PodList, f func(api.Pod) bool) []api.Pod {
 		}
 	}
 	return pods
-}
-
-// Retrieve username of security context user based on userid
-func GetRunAsUsername(pod *api.Pod) (string, error) {
-	runAsUser := pod.Spec.SecurityContext.RunAsUser
-	if runAsUser == nil {
-		return "", goerrors.New("runAsUser is not set for Pod " + pod.Name)
-	}
-
-	uid := strconv.Itoa(int(*runAsUser))
-	if user, err := user.LookupId(uid); err != nil {
-		// LookupId failed, fall back to getent
-		exe := exec.New()
-		out, e2 := exe.Command("/usr/bin/getent", "passwd", uid).CombinedOutput()
-		if e2 != nil || strings.TrimSpace(string(out)) == "" {
-			return "", err
-		}
-		// assume the first
-		res := strings.Split(string(out), ":")
-		return res[0], nil
-	} else {
-		return user.Username, nil
-	}
-}
-
-func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
-	return pod.Namespace + ".pods." + clusterDomain
-}
-
-// Get Kerberos KDC cluster name for the Pod
-func GetPodKDCClusterName(pod *api.Pod, clusterDomain string) (string, error) {
-	if userName, err := GetRunAsUsername(pod); err != nil {
-		return "", err
-	} else {
-		return userName + "." + pod.Name + "." + GetPodDomainName(pod, clusterDomain), nil
-	}
 }
