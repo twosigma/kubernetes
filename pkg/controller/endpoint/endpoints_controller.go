@@ -35,6 +35,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller/informers"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/metrics"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -73,13 +74,14 @@ var (
 )
 
 // NewEndpointController returns a new *EndpointController.
-func NewEndpointController(podInformer cache.SharedIndexInformer, client clientset.Interface) *EndpointController {
+func NewEndpointController(podInformer cache.SharedIndexInformer, client clientset.Interface, clusterDomain string) *EndpointController {
 	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
 		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_controller", client.Core().RESTClient().GetRateLimiter())
 	}
 	e := &EndpointController{
-		client: client,
-		queue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "endpoint"),
+		client:        client,
+		clusterDomain: clusterDomain,
+		queue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "endpoint"),
 	}
 
 	e.serviceStore.Indexer, e.serviceController = cache.NewIndexerInformer(
@@ -119,7 +121,7 @@ func NewEndpointController(podInformer cache.SharedIndexInformer, client clients
 // NewEndpointControllerFromClient returns a new *EndpointController that runs its own informer.
 func NewEndpointControllerFromClient(client *clientset.Clientset, resyncPeriod controller.ResyncPeriodFunc) *EndpointController {
 	podInformer := informers.NewPodInformer(client, resyncPeriod())
-	e := NewEndpointController(podInformer, client)
+	e := NewEndpointController(podInformer, client, "cluster.local.")
 	e.internalPodInformer = podInformer
 
 	return e
@@ -129,8 +131,9 @@ func NewEndpointControllerFromClient(client *clientset.Clientset, resyncPeriod c
 type EndpointController struct {
 	client clientset.Interface
 
-	serviceStore cache.StoreToServiceLister
-	podStore     cache.StoreToPodLister
+	clusterDomain string
+	serviceStore  cache.StoreToServiceLister
+	podStore      cache.StoreToPodLister
 
 	// internalPodInformer is used to hold a personal informer.  If we're using
 	// a normal shared informer, then the informer will be started for us.  If
@@ -346,6 +349,12 @@ func (e *EndpointController) syncService(key string) error {
 		// the service is deleted, we will miss that deletion, so this
 		// doesn't completely solve the problem. See #6877.
 		namespace, name, err := cache.SplitMetaNamespaceKey(key)
+		kdcClusterName := name + "." + namespace + ".svc." + e.clusterDomain
+		glog.V(4).Infof("Service %s/%s deleted, will empty KDC cluster %s",
+			namespace, name, kdcClusterName)
+		if errClean := krbutils.CleanServiceInKDC(kdcClusterName); errClean != nil {
+			glog.Errorf("error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
+		}
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("Need to delete endpoint with key %q, but couldn't understand the key: %v", key, err))
 			// Don't retry, as the key isn't going to magically become understandable.
