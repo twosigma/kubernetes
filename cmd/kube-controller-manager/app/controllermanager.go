@@ -258,7 +258,7 @@ func StartControllers(s *options.CMServer, kubeconfig *restclient.Config, rootCl
 		}
 	}
 
-	go endpointcontroller.NewEndpointController(sharedInformers.Pods().Informer(), client("endpoint-controller")).
+	go endpointcontroller.NewEndpointController(sharedInformers.Pods().Informer(), client("endpoint-controller"), s.ClusterDomain).
 		Run(int(s.ConcurrentEndpointSyncs), wait.NeverStop)
 	time.Sleep(wait.Jitter(s.ControllerStartInterval.Duration, ControllerStartJitter))
 
