@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -2661,6 +2662,10 @@ func (kl *Kubelet) canAdmitPod(pods []*api.Pod, pod *api.Pod) (bool, string, str
 // state every sync-frequency seconds. Never returns.
 func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHandler) {
 	glog.Info("Starting kubelet main sync loop.")
+	// sleep a bit to introduce jitter in kubelet loops across the cluster
+	// to prevent (almost) synchronized calls to Kerberos utilities
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	time.Sleep(time.Duration(r.Intn(5000)) * time.Millisecond)
 	// The resyncTicker wakes up kubelet to checks if there are any pod workers
 	// that need to be sync'd. A one-second period is sufficient because the
 	// sync interval is defaulted to 10s.
