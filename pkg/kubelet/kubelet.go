@@ -1362,7 +1362,7 @@ func refreshCerts(clusterName, certsDir, user string) error {
 	// we can not retry here since exit status of 1 is a normal condition
 	// indicating expired certificate
 	// TODO: check if we can change pwdb output to differentiate between expired cert and other error
-	if out, err := krbutils.RunCommand(krbutils.Pwdbath, "cert", "-e", "-h", clusterName); err != nil {
+	if out, err := krbutils.RunCommand(krbutils.PwdbPath, "cert", "-e", "-h", clusterName); err != nil {
 		glog.Errorf("certificate files for cluster %s is expired (or other error happened), error: %v, output: %v",
 			clusterName, err, string(out))
 		// request the certs file refresh and retry if needed
