@@ -39,6 +39,8 @@ const(
 	// user that we want to own Kerberos keytab file
 	KeytabOwner = "tsk8s"
 
+	CertsOwner = "root"
+
 	// ticket file user group
 	TicketUserGroup = "twosigma"
 	
@@ -48,11 +50,17 @@ const(
 	// keytab subdirectory within Pod's directory on the host
 	KeytabDirForPod = "keytabs"
 
+	// certs subdirectory within Pod's directory on the host
+	CertsDirForPod = "certs"
+
 	// location of ktutil
 	KtutilPath = "/usr/bin/ktutil"
 
 	//host keytab file
 	HostKeytabFile = "/var/spool/keytabs/" + KeytabOwner
+
+	//host certs directory
+	HostCertsFile = "/var/spool/certs/" + CertsOwner
 
 	// host directory with pre-stashed Kerberos tickets
 	HostPrestashedTktsDir = "/home/" + KeytabOwner + "/tickets/"
@@ -66,6 +74,9 @@ const(
 	// keytab path inside of Pod
 	KeytabPathInPod = "/var/spool/keytabs"
 
+	// certs path inside of Pod
+	CertsPathInPod = "/var/spool/certs/"
+
 	// directory to store ticket file inside of the Pod
 	TicketDirInPod = "/var/spool/tickets"
 
@@ -74,6 +85,9 @@ const(
 
 	// krb5_keytab binary
 	Krb5keytabPath = "/usr/sbin/krb5_keytab"
+
+	// pwdb binary
+	PwdbPath = "/usr/bin/pwdb"
 
 	// location to generate ACL files for krb5_keytab delegation
 	Krb5keytabAclDir = "/etc/krb5/krb5_keytab.service2user.d/"
