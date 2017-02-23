@@ -60,6 +60,9 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 			return admission.NewForbidden(attributes, errors.New("runAsUser is required in the manifest"))
 		}
 	} else {
+		if pod.ObjectMeta.Annotations == nil {
+			pod.ObjectMeta.Annotations = map[string]string{}
+		}
 		pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation] = runAsUserName
 		glog.V(0).Infof(
 			"there is annotation %s for pod %s in namespace %s",
