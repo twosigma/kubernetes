@@ -415,6 +415,8 @@ func DeepCopy_v1alpha1_KubeletConfiguration(in interface{}, out interface{}, c *
 			out.AllowedUnsafeSysctls = nil
 		}
 		out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
+		out.TSHostnameFqdn = in.TSHostnameFqdn
+		out.TSCustomResolvConf = in.TSCustomResolvConf
 		return nil
 	}
 }

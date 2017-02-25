@@ -68,7 +68,7 @@ func tokenSecretReferences() []api.ObjectReference {
 
 // addTokenSecretReference adds a reference to the ServiceAccountToken that will be created
 func addTokenSecretReference(refs []api.ObjectReference) []api.ObjectReference {
-	return addNamedTokenSecretReference(refs, "default-token-fplln")
+	return addNamedTokenSecretReference(refs, "default-token-fpl")
 }
 
 // addNamedTokenSecretReference adds a reference to the named ServiceAccountToken
@@ -113,9 +113,9 @@ func opaqueSecret() *api.Secret {
 }
 
 // createdTokenSecret returns the ServiceAccountToken secret posted when creating a new token secret.
-// Named "default-token-fplln", since that is the first generated name after rand.Seed(1)
+// Named "default-token-fpl", since that is the first generated name after rand.Seed(1)
 func createdTokenSecret(overrideName ...string) *api.Secret {
-	return namedCreatedTokenSecret("default-token-fplln")
+	return namedCreatedTokenSecret("default-token-fpl")
 }
 
 // namedTokenSecret returns the ServiceAccountToken secret posted when creating a new token secret with the given name.
@@ -258,12 +258,12 @@ func TestTokenCreation(t *testing.T) {
 
 				// Attempt 2
 				core.NewGetAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, "default"),
-				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-gziey")),
+				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-lng")),
 
 				// Attempt 3
 				core.NewGetAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, "default"),
-				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-oh43e")),
-				core.NewUpdateAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, serviceAccount(addNamedTokenSecretReference(emptySecretReferences(), "default-token-oh43e"))),
+				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-zie")),
+				core.NewUpdateAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, serviceAccount(addNamedTokenSecretReference(emptySecretReferences(), "default-token-zie"))),
 			},
 		},
 		"new serviceaccount with no secrets encountering unending create error": {
@@ -287,10 +287,10 @@ func TestTokenCreation(t *testing.T) {
 				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, createdTokenSecret()),
 				// Retry 1
 				core.NewGetAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, "default"),
-				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-gziey")),
+				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-lng")),
 				// Retry 2
 				core.NewGetAction(unversioned.GroupVersionResource{Resource: "serviceaccounts"}, api.NamespaceDefault, "default"),
-				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-oh43e")),
+				core.NewCreateAction(unversioned.GroupVersionResource{Resource: "secrets"}, api.NamespaceDefault, namedCreatedTokenSecret("default-token-zie")),
 			},
 		},
 		"new serviceaccount with missing secrets": {

@@ -58,14 +58,14 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/server/stats"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/clock"
 	"k8s.io/kubernetes/pkg/util/configz"
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
-	"k8s.io/kubernetes/pkg/util/clock"
 	"k8s.io/kubernetes/pkg/util/flushwriter"
 	"k8s.io/kubernetes/pkg/util/httpstream"
 	"k8s.io/kubernetes/pkg/util/httpstream/spdy"
-	"k8s.io/kubernetes/pkg/util/limitwriter"
 	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
+	"k8s.io/kubernetes/pkg/util/limitwriter"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/term"
 	"k8s.io/kubernetes/pkg/volume"
@@ -577,23 +577,22 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 
 		pods := s.host.GetPods()
 		allNeededPrincipals := map[string]bool{}
+		realm := krbutils.KerberosRealm
 		for _, pod := range pods {
-			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
+			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
-					if realm, ok := pod.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
-						if pod.Spec.SecurityContext.RunAsUser != nil {
-							glog.V(5).Infof("will refresh keytab file for pod %s", pod.Name)
-							// extract from global keytab file the parts relevant to this POD
-							if principals, err := s.refreshKeytab(keytabFile, pod, user, services, realm); err != nil {
-								glog.Errorf("keytab refresh for pod %s failed: %v", pod.Name, err)
-								lastError = err
-							} else {
-								glog.V(5).Infof("keytab file refresh for pod %s completed", pod.Name)
-								// store which principals are still being used (for trimming of the keytab file later)
-								for p := range principals {
-									if !allNeededPrincipals[p] {
-										allNeededPrincipals[p] = true
-									}
+					if pod.Spec.SecurityContext.RunAsUser != nil {
+						glog.V(5).Infof("will refresh keytab file for pod %s", pod.Name)
+						// extract from global keytab file the parts relevant to this POD
+						if principals, err := s.refreshKeytab(keytabFile, pod, user, services, realm); err != nil {
+							glog.Errorf("keytab refresh for pod %s failed: %v", pod.Name, err)
+							lastError = err
+						} else {
+							glog.V(5).Infof("keytab file refresh for pod %s completed", pod.Name)
+							// store which principals are still being used (for trimming of the keytab file later)
+							for p := range principals {
+								if !allNeededPrincipals[p] {
+									allNeededPrincipals[p] = true
 								}
 							}
 						}
@@ -609,7 +608,7 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 				glog.Errorf("could not retrieve hostname of the node, error: %+v", err)
 			} else {
 				// in addition, we need to protect user's keytab from being trimmed
-				allNeededPrincipals[krbutils.KeytabOwner+"/"+nodeHostname+"@"+krbutils.KeytabOwnerRealm] = true
+				allNeededPrincipals[krbutils.KeytabOwner+"/"+nodeHostname+"@"+krbutils.KerberosRealm] = true
 				glog.V(4).Infof("trimming will preserve principals: %+v", allNeededPrincipals)
 				if err := trimKeytabFile(keytabFile, allNeededPrincipals); err != nil {
 					glog.Errorf("error trimming the keytab file %+v", err)
@@ -650,7 +649,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 	}
 	tmpFileOut := fileOut.Name()
 	defer os.Remove(tmpFileOut)
-	podClusterName, err := krbutils.GetPodKDCClusterName(pod, s.host.GetClusterDomain())
+	podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, s.host.GetClusterDomain())
 	if err != nil {
 		glog.Errorf("failed to get KDC cluster name for the Pod %s, can not refresh the keytab, err: %v",
 			pod.Name, err)
@@ -663,7 +662,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
 		return nil, err
 	}
-	podAllClusters := append(podServiceClusters, podClusterName)
+	podAllClusters := append(podServiceClusters, podClusterNames...)
 
 	//generate cartesian product of services and cluster names that represents all Kerberos principals this Pod needs
 	principals := map[string]bool{}
@@ -672,8 +671,8 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 			principals[srv+"/"+clusterName+"@"+realm] = true
 		}
 	}
-	glog.V(4).Infof("refreshing keytab for POD %s with clusterName %s podDir %s for user %s and services %+v principals %+v",
-		pod.Name, podClusterName, podDir, userName, services, principals)
+	glog.V(4).Infof("refreshing keytab for POD %s with clusterNames %+v podDir %s for user %s and services %+v principals %+v",
+		pod.Name, podClusterNames, podDir, userName, services, principals)
 	if out, err := krbutils.RunCommand("/bin/cp", "-f", keytabFile, tmpFile); err != nil {
 		glog.Errorf("error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
 		return nil, err
@@ -780,7 +779,7 @@ func extractKeytab(keytabFilename, keytabFilenameOut string, principals map[stri
 	defer clock.ExecTime(time.Now(), "extractKeytab", keytabFilename)
 
 	// list all entries in the keytab file
-	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt "+keytabFilename+"\nlist\nq\n"},[]string{})
+	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilename + "\nlist\nq\n"}, []string{})
 	if err != nil {
 		glog.Errorf("exec with pipe failed, error %v", err)
 		return err

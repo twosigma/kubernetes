@@ -341,6 +341,8 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_componentconfig_KubeletConfigu
 	}
 	out.AllowedUnsafeSysctls = in.AllowedUnsafeSysctls
 	out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
+	out.TSHostnameFqdn = in.TSHostnameFqdn
+	out.TSCustomResolvConf = in.TSCustomResolvConf
 	return nil
 }
 
@@ -523,6 +525,8 @@ func autoConvert_componentconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigu
 	}
 	out.AllowedUnsafeSysctls = in.AllowedUnsafeSysctls
 	out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
+	out.TSHostnameFqdn = in.TSHostnameFqdn
+	out.TSCustomResolvConf = in.TSCustomResolvConf
 	return nil
 }
 
