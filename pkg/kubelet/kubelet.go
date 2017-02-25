@@ -2073,55 +2073,55 @@ func (kl *Kubelet) HandlePodAdditions(pods []*api.Pod) {
 func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
-
 		isDelete := pod.DeletionTimestamp != nil
 		if isDelete {
 			glog.V(5).Infof("The update is delete for pod %s", pod.Name)
 		} else {
 			glog.V(5).Infof("The update is NOT delete (a regular update) for pod %s", pod.Name)
 		}
-		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
+		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 			if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok && !isDelete {
 				kl.refreshTSTkt(pod, user, tkt)
 			}
 			if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
-				if realm, ok := pod.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
-					// TODO: check if we can optimize by comparing with the old version of the required services,
-					// i.e., if the list has not changed no need to do this.
-					// NOTE: We assume that the pod name can not change, so no re-registration in KDC is done here. That needs
-					// to be verified.
-					podClusterName, err := krbutils.GetPodKDCClusterName(pod, kl.clusterDomain)
-					if err != nil {
-						glog.V(2).Infof("Failed to get KDC cluster name for the Pod %s, not updating keytab, err: %v",
-							pod.Name, err)
-						continue
-					}
-					if isDelete {
-						// Remove the node from the KDC cluster of the Pod. No removal of actual singleton cluster
-						// is done since the krb5_* software suite does not provide for that at the moment. The cleanup
-						// aspect should be revisited since a large number of empty singleton clusters can build up in KDC.
+				realm := krbutils.KerberosRealm
+				// TODO: check if we can optimize by comparing with the old version of the required services,
+				// i.e., if the list has not changed no need to do this.
+				// NOTE: We assume that the pod name can not change, so no re-registration in KDC is done here. That needs
+				// to be verified.
+				podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, kl.clusterDomain)
+				if err != nil {
+					glog.V(2).Infof("Failed to get KDC cluster name for the Pod %s, not updating keytab, err: %v",
+						pod.Name, err)
+					continue
+				}
+				if isDelete {
+					// Remove the node from the KDC clusters of the Pod. No removal of actual singleton cluster
+					// is done since the krb5_* software suite does not provide for that at the moment. The cleanup
+					// aspect should be revisited since a large number of empty singleton clusters can build up in KDC.
+					for _, podClusterName := range podClusterNames {
 						if err := krbutils.RemoveHostFromClusterInKDC(podClusterName, kl.hostname); err != nil {
-							glog.V(2).Infof("Failed to remove host %s from KDC cluster %s for pod %q during Pod update for delete, err: %v",
-								kl.hostname, podClusterName, format.Pod(pod), err)
+							glog.V(2).Infof("Failed to remove host %s from KDC clusters %+v for pod %q during Pod update for delete, err: %v",
+								kl.hostname, podClusterNames, format.Pod(pod), err)
 						} else {
-							glog.V(5).Infof("Removed host %s from KDC cluster %s for pod %q during Pod update for delete",
-								kl.hostname, podClusterName, format.Pod(pod))
+							glog.V(5).Infof("Removed host %s from KDC clusters %+v for pod %q during Pod update for delete",
+								kl.hostname, podClusterNames, format.Pod(pod))
 						}
-					} else { // it is a normal update, not a graceful delete
-						podServiceClusters, err := kl.GetPodClusters(pod)
-						if err != nil {
-							glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
-								pod.Name, err)
-						}
-						keytabFilePath := path.Join(kl.getPodDir(pod.UID), "keytabs")
-						if err := createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
-							kl.hostname, realm, podServiceClusters, user); err != nil {
-							glog.Errorf("error creating keytab (in update) Pod %s cluster %s services %+v, error: %v",
-								pod.Name, podClusterName, services, err)
-						} else {
-							glog.V(5).Infof("Updated keytab file (during Pod update) for cluster %s and services %+v for POD %q",
-								podClusterName, services, format.Pod(pod))
-						}
+					}
+				} else { // it is a normal update, not a graceful delete
+					podServiceClusters, err := kl.GetPodClusters(pod)
+					if err != nil {
+						glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+							pod.Name, err)
+					}
+					keytabFilePath := path.Join(kl.getPodDir(pod.UID), "keytabs")
+					if err := createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
+						kl.hostname, realm, podServiceClusters, user); err != nil {
+						glog.Errorf("error creating keytab (in update) Pod %s clusters %+v services %+v, error: %v",
+							pod.Name, podClusterNames, services, err)
+					} else {
+						glog.V(5).Infof("Updated keytab file (during Pod update) for clusters %+v and services %+v for POD %q",
+							podClusterNames, services, format.Pod(pod))
 					}
 				}
 			}
@@ -2144,19 +2144,22 @@ func (kl *Kubelet) HandlePodRemoves(pods []*api.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
 		// Remove this node from Pod's singleton cluster
-		podClusterName, err := krbutils.GetPodKDCClusterName(pod, kl.clusterDomain)
+		podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, kl.clusterDomain)
 		if err != nil {
 			glog.V(2).Infof("Failed to get KDC cluster name for the Pod %s, not removing node from the cluster, err: %v",
 				pod.Name, err)
 			continue
 		}
-		if err = krbutils.RemoveHostFromClusterInKDC(podClusterName, kl.hostname); err != nil {
-			glog.V(2).Infof("Failed to remove host %s from KDC cluster %s for pod %q, err: %v",
-				kl.hostname, podClusterName, format.Pod(pod), err)
-		} else {
-			glog.V(5).Infof("Removed host %s from KDC cluster %s for pod %q",
-				kl.hostname, podClusterName, format.Pod(pod))
+		for _, podClusterName := range podClusterNames {
+			if err = krbutils.RemoveHostFromClusterInKDC(podClusterName, kl.hostname); err != nil {
+				glog.V(2).Infof("Failed to remove host %s from KDC cluster %s for pod %q, err: %v",
+					kl.hostname, podClusterName, format.Pod(pod), err)
+			} else {
+				glog.V(5).Infof("Removed host %s from KDC cluster %s for pod %q",
+					kl.hostname, podClusterName, format.Pod(pod))
+			}
 		}
+
 		kl.podManager.DeletePod(pod)
 		if kubepod.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)
