@@ -92,10 +92,10 @@ import (
 	"k8s.io/kubernetes/pkg/util/integer"
 	kubeio "k8s.io/kubernetes/pkg/util/io"
 	utilipt "k8s.io/kubernetes/pkg/util/iptables"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/mount"
 	nodeutil "k8s.io/kubernetes/pkg/util/node"
 	"k8s.io/kubernetes/pkg/util/oom"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/procfs"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -165,7 +165,6 @@ const (
 
 	// Minimum number of dead containers to keep in a pod
 	minDeadContainerInPod = 1
-
 )
 
 // SyncHandler is an interface implemented by Kubelet, for testability
@@ -1516,7 +1515,7 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 		pod.Name, podDir, principals)
 
 	// list all entries in the keytab file
-	outb, errb, err := krbutils.ExecWithPipe("printf", "/usr/bin/ktutil", []string{"rkt "+podKeytabPath+"\nlist\nq\n"},[]string{})
+	outb, errb, err := krbutils.ExecWithPipe("printf", "/usr/bin/ktutil", []string{"rkt " + podKeytabPath + "\nlist\nq\n"}, []string{})
 	if err != nil {
 		glog.Errorf("exec with pipe failed, error %v", err)
 		return err
@@ -1578,7 +1577,7 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 
 // Add node on which the kubelet runs to the KDC cluster
 func addHostToClusterInKDC(clusterName, hostName string) error {
-	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName + " " + hostName)
+	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName+" "+hostName)
 	var lastErr error
 	var lastOut []byte
 	var retry int
@@ -1611,7 +1610,7 @@ func refreshKeytab(clusterName, services, realm string) error {
 	// the manifest annotation.
 	var lastErr error
 	var lastOut []byte
-	var retry int	
+	var retry int
 	for _, srv := range strings.Split(services, ",") {
 		// for each principal we need to create an ACL file in order to be able to request it as another user
 		data := []byte(krbutils.KeytabOwner + " " + realm + " " + srv + " " + clusterName)
@@ -1625,7 +1624,7 @@ func refreshKeytab(clusterName, services, realm string) error {
 		for retry = 0; retry < krbutils.MaxKrb5RetryCount; retry++ {
 			if out, err := krbutils.RunCommand(krbutils.Krb5keytabPath, "-p", krbutils.KeytabOwner, srv+"/"+clusterName); err != nil {
 				lastErr = err
-				lastOut = out				
+				lastOut = out
 				glog.Errorf("error creating service key for service %s in cluster %s during %d retry, error: %v, output: %v",
 					srv, clusterName, retry, err, string(out))
 				time.Sleep(krbutils.Krb5RetrySleepSec)
@@ -1682,12 +1681,18 @@ func (kl *Kubelet) GetPodClusters(pod *api.Pod) ([]string, error) {
 			}
 		}
 		return serviceClusters, nil
-        }
+	}
 }
 
 func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
 	tktFilePath := path.Join(podDir, krbutils.TicketDirForPod)
-	if err := decodeTicket(tktFilePath, tkt, userName, krbutils.TicketUserGroup); err != nil {
+	// skip tkt decode if the file already exists, which means the pod is restarted rather than created
+	if _, err := os.Stat(tktFilePath); os.IsNotExist(err) {
+		if err := decodeTicket(tktFilePath, tkt, userName, krbutils.TicketUserGroup); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		// something else went wrong
 		return nil, err
 	}
 	return &kubecontainer.Mount{
@@ -1891,7 +1896,7 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	if kl.kubeletConfiguration.TSHostnameFqdn {
 		opts.Hostname = hostname + "." + hostDomainName
 	} else {
-		opts.Hostname = hostname		
+		opts.Hostname = hostname
 	}
 	if len(opts.Hostname) > hostnameMaxLen {
 		return nil, errors.New("Container hostname " + opts.Hostname + " is too long (63 characters limit).")
@@ -1913,8 +1918,8 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	// compute the list of clusters the Pod is member of (based on services selecting this Pod)
 	podServiceClusters, err := kl.GetPodClusters(pod)
 	if err != nil {
-           glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
-	   return nil, err
+		glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
+		return nil, err
 	}
 
 	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes,
@@ -3086,8 +3091,8 @@ func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
 						keytabFilePath := path.Join(kl.getPodDir(pod.UID), "keytabs")
 						if err := createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
 							kl.hostname, realm, podServiceClusters, user); err != nil {
-								glog.Errorf("error creating keytab (in update) Pod %s cluster %s services %+v, error: %v",
-									pod.Name, podClusterName, services, err)
+							glog.Errorf("error creating keytab (in update) Pod %s cluster %s services %+v, error: %v",
+								pod.Name, podClusterName, services, err)
 						} else {
 							glog.V(5).Infof("Updated keytab file (during Pod update) for cluster %s and services %+v for POD %q",
 								podClusterName, services, format.Pod(pod))
