@@ -1787,7 +1787,7 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 	// for non-infra containers with ts/user specified, we create a subdirectory under /sys/fs/cgroup/docker/<id>/<user>
 	// such that ts users can control cgroups
 	if container.Name != PodInfraContainerName {
-		if tsUser, ok := pod.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
+		if tsUser, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 			cgroupPath := fmt.Sprintf("/sys/fs/cgroup/cpu/docker/%v/%v", id.ID, tsUser)
 			glog.V(5).Infof("need to create cgroup under container %v for user %v at %v", id.ID, tsUser, cgroupPath)
 			exe := kexec.New()

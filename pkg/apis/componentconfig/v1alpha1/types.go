@@ -511,6 +511,10 @@ type KubeletConfiguration struct {
 	// (binaries, etc.) to mount the volume are available on the underlying node. If the check is enabled
 	// and fails the mount operation fails.
 	ExperimentalCheckNodeCapabilitiesBeforeMount bool `json:"ExperimentalCheckNodeCapabilitiesBeforeMount,omitempty"`
+	// This flag, if set, makes kubelet set Pod's hostname to its fqdn
+	TSHostnameFqdn bool `json:"TSHostnameFqdn,omitempty"`
+	// This flag, if set, makes kubelet generate custom /etc/resolv.conf file
+	TSCustomResolvConf bool `json:"TSCustomResolvConf,omitempty"`
 }
 
 type KubeletAuthorizationMode string

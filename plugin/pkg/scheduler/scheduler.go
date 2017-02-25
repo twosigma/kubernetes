@@ -154,12 +154,13 @@ func (s *Scheduler) scheduleOne() {
 				}
 			}
 		}
-	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
-		// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
-		if realm, ok := assumed.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
+	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+		if assumed.ObjectMeta.Annotations[krbutils.TSPrestashTkt] == "true" {
+			// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
+			realm := krbutils.KerberosRealm
 			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof("got %s=%s, %s=%s, trying to create token from prestashed ticket",
-				krbutils.TSUserAnnotation, user, krbutils.TSRealmAnnotation, realm)
+			glog.Infof("got %s=%s, KerberosRealm=%s, trying to create token from prestashed ticket",
+				krbutils.TSRunAsUserAnnotation, user, realm)
 			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir+"@%s/%s", realm, user)
 			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
 				glog.Errorf("prestashed ticket for %s@%s does not exist", user, realm)

@@ -50,11 +50,6 @@ const (
 	// A subdomain added to the user specified dmoain for all pods.
 	podSubdomain = "pod"
 
-	// Additional subdomain for pods so they can be addressed by name instead of IP with dashes.
-	// Pods can be addressed as <pod-name>.<namespace>.pods.<cluster-domain> in addition to the
-	// default <pod-ip-with-dashes>.<namespace>.pod.<cluster-domain>.
-	namedPodsSubdomain = "pods"
-
 	// Resync period for the kube controller loop.
 	resyncPeriod = 5 * time.Minute
 
@@ -369,8 +364,8 @@ func (kd *KubeDNS) newPod(obj interface{}) {
 	if p, ok := obj.(*kapi.Pod); ok && len(p.Status.PodIP) > 0 {
 		glog.V(4).Infof("Add pod %s with IP %s", p.Name, p.Status.PodIP)
 		recordValue, _ := util.GetSkyMsg(p.Status.PodIP, 0)
-		cachePath := append(kd.domainPath, namedPodsSubdomain, p.Namespace)
-		domainLabels := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name)
+		cachePath := append(kd.domainPath, p.Namespace)
+		domainLabels := append(kd.domainPath, p.Namespace, p.Name)
 		fqdn := dns.Fqdn(strings.Join(util.ReverseArray(domainLabels), "."))
 		kd.cacheLock.Lock()
 		defer kd.cacheLock.Unlock()
@@ -380,7 +375,7 @@ func (kd *KubeDNS) newPod(obj interface{}) {
 		if runAsUsername, ok := p.ObjectMeta.Annotations["ts/runasusername"]; ok {
 			glog.V(0).Infof("runAsUser %s provided for pod %s, adding additional DNS entry", runAsUsername, p.Name)
 			cachePath = append(cachePath, p.Name)
-			domainLabels := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name, runAsUsername)
+			domainLabels := append(kd.domainPath, p.Namespace, p.Name, runAsUsername)
 			fqdn := dns.Fqdn(strings.Join(util.ReverseArray(domainLabels), "."))
 			kd.cache.SetEntry(runAsUsername, recordValue, fqdn, cachePath...)
 		} else {
@@ -402,7 +397,7 @@ func (kd *KubeDNS) updatePod(oldobj, newobj interface{}) {
 
 func (kd *KubeDNS) removePod(obj interface{}) {
 	if p, ok := obj.(*kapi.Pod); ok {
-		subCachePath := append(kd.domainPath, namedPodsSubdomain, p.Namespace, p.Name)
+		subCachePath := append(kd.domainPath, p.Namespace, p.Name)
 		glog.V(4).Infof("Remove pod %s at path %s", p.Name, subCachePath)
 		kd.cacheLock.Lock()
 		defer kd.cacheLock.Unlock()
