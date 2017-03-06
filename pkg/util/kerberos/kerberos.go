@@ -34,7 +34,7 @@ import (
 )
 
 // constants used by Kerberos extensions
-const(
+const (
 	// TODO: keytab owner, realm, and group should be parameters passed externally
 	// user that we want to own Kerberos keytab file
 	KeytabOwner = "tsk8s"
@@ -43,9 +43,9 @@ const(
 
 	// ticket file user group
 	TicketUserGroup = "twosigma"
-	
-	// Kerberos realm 
-	KeytabOwnerRealm = "N.TWOSIGMA.COM"
+
+	// Kerberos realm
+	KerberosRealm = "N.TWOSIGMA.COM"
 
 	// keytab subdirectory within Pod's directory on the host
 	KeytabDirForPod = "keytabs"
@@ -64,7 +64,7 @@ const(
 
 	// host directory with pre-stashed Kerberos tickets
 	HostPrestashedTktsDir = "/home/" + KeytabOwner + "/tickets/"
-	
+
 	// URL of the kubelet REST service (for callback)
 	KubeletRESTServiceURL = "http://localhost:10255/refreshkeytabs"
 
@@ -98,13 +98,15 @@ const(
 	// location of chown binary
 	ChownPath = "/bin/chown"
 
-	// ts extended manifest annotations
-	TSUserAnnotation = "ts/user"
-	TSRealmAnnotation = "ts/realm"
-	TSServicesAnnotation = "ts/services"
-	TSTicketAnnotation = "ts/ticket"
-	TSTokenAnnotation = "ts/token"
-	TSRunAsUserAnnotation = "ts/runasusername"
+	// TS extended manifest annotations
+	TSPrestashTkt                = "ts/prestashtkt"
+	TSServicesAnnotation         = "ts/services"
+	TSExternalClustersAnnotation = "ts/externalclusters"
+	TSTicketAnnotation           = "ts/ticket"
+	TSTokenAnnotation            = "ts/token"
+	TSRunAsUserAnnotation        = "ts/runasusername"
+	TSCertsAnnotation            = "ts/certs"
+	TSPrefixedHostnameAnnotation = "ts/userprefixedhostname"
 )
 
 // Retrieve username of security context user based on userid
@@ -137,15 +139,25 @@ func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
 }
 
 // Get Kerberos KDC cluster name for the Pod
-func GetPodKDCClusterName(pod *api.Pod, clusterDomain string) (string, error) {
+func GetPodKDCClusterNames(pod *api.Pod, clusterDomain string) ([]string, error) {
+	podKDCHostnames := []string{}
 	if userName, err := GetRunAsUsername(pod); err != nil {
-		return "", err
+		return []string{}, err
 	} else {
-		return userName + "." + pod.Name + "." + GetPodDomainName(pod, clusterDomain), nil
+		podKDCHostnames = append(podKDCHostnames, pod.Name+"."+GetPodDomainName(pod, clusterDomain))
+		if prefixedHostname, ok := pod.ObjectMeta.Annotations[TSPrefixedHostnameAnnotation]; ok && prefixedHostname == "true" {
+			podKDCHostnames = append(podKDCHostnames, userName+"."+pod.Name+"."+GetPodDomainName(pod, clusterDomain))
+		}
+		if externalClusters, ok := pod.ObjectMeta.Annotations[TSExternalClustersAnnotation]; ok && externalClusters != "" {
+			for _, externalCluster := range strings.Split(externalClusters, ",") {
+				podKDCHostnames = append(podKDCHostnames, externalCluster)
+			}
+		}
+		return podKDCHostnames, nil
 	}
 }
 
-const(
+const (
 	// max number oif retries when calling Kerbereos utility functions
 	MaxKrb5RetryCount = 5
 	Krb5RetrySleepSec = 2 * time.Second
@@ -191,7 +203,7 @@ func RunCommand(cmdToExec string, params ...string) ([]byte, error) {
 func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, bytes.Buffer, error) {
 	var o, e bytes.Buffer
 
-	defer clock.ExecTime(time.Now(), "execWithPipe", cmd1Str + " " + cmd2Str)
+	defer clock.ExecTime(time.Now(), "execWithPipe", cmd1Str+" "+cmd2Str)
 
 	glog.V(4).Infof("entering execWithPipe() cmd1 %s cmd2 %s", cmd1Str, cmd2Str)
 
@@ -199,7 +211,6 @@ func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, b
 
 	cmd1 := exec.Command(cmd1Str, par1...)
 	cmd2 := exec.Command(cmd2Str, par2...)
-
 
 	cmd1.Stdout = w
 	cmd2.Stdin = r
@@ -230,7 +241,7 @@ func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, b
 }
 
 func RemoveHostFromClusterInKDC(clusterName, hostName string) error {
-	defer clock.ExecTime(time.Now(), "removeHostFromClusterInKDC", clusterName + " " + hostName)
+	defer clock.ExecTime(time.Now(), "removeHostFromClusterInKDC", clusterName+" "+hostName)
 	var lastErr error
 	var lastOut []byte
 	var retry int
@@ -258,8 +269,8 @@ func CleanServiceInKDC(clusterName string) error {
 	outb, errb, err := ExecWithPipe(
 		"/usr/bin/krb5_admin",
 		"awk",
-		[]string{"query_host",clusterName},
-		[]string{"-v","p=member:","($1==p){print $2;}"})
+		[]string{"query_host", clusterName},
+		[]string{"-v", "p=member:", "($1==p){print $2;}"})
 	if err != nil {
 		glog.Errorf("exec with pipe failed while cleaning service cluster %s in KDC, error %v, errb %s, outb %s",
 			clusterName, err, errb.String(), outb.String())
@@ -271,7 +282,7 @@ func CleanServiceInKDC(clusterName string) error {
 	} else {
 		glog.V(4).Infof("retrieved members of cluster %s are %+v", clusterName, outb.String())
 	}
-	memberNodes := strings.Trim(outb.String(),"\n")
+	memberNodes := strings.Trim(outb.String(), "\n")
 	var lastErr error
 	lastErr = nil
 	for _, nodeName := range strings.Split(memberNodes, ",") {

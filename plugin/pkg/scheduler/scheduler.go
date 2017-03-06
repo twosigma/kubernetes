@@ -29,7 +29,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/util/exec"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"	
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/metrics"
@@ -157,19 +157,26 @@ func (s *Scheduler) scheduleOne() {
 				}
 			}
 		}
-	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSUserAnnotation]; ok {
-		// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
-		if realm, ok := assumed.ObjectMeta.Annotations[krbutils.TSRealmAnnotation]; ok {
+	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+		glog.V(3).Infof("userrunas is %s", user)
+		if assumed.ObjectMeta.Annotations[krbutils.TSPrestashTkt] == "true" {
+			glog.V(3).Infof("in prestash")
+			// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
+			realm := krbutils.KerberosRealm
 			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof("got %s=%s, %s=%s, trying to create token from prestashed ticket",
-				krbutils.TSUserAnnotation, user, krbutils.TSRealmAnnotation, realm)
-			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir + "@%s/%s", realm, user)
+			glog.Infof("got %s=%s, KerberosRealm=%s, trying to create token from prestashed ticket",
+				krbutils.TSRunAsUserAnnotation, user, realm)
+			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir+"@%s/%s", realm, user)
 			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
 				glog.Errorf("prestashed ticket for %s@%s does not exist", user, realm)
 			} else {
 				tokenFile = tktPath
 			}
+		} else {
+			glog.V(3).Infof("NO prestash")
 		}
+	} else {
+		glog.V(3).Infof("NO user")
 	}
 
 	if tokenFile != "" {

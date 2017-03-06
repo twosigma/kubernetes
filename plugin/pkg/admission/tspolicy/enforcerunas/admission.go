@@ -60,6 +60,15 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 			return admission.NewForbidden(attributes, errors.New("runAsUser is required in the manifest"))
 		}
 	} else {
+		// verify that all init and regular containers within the Pod have the same runAsUser as the Pod, if set
+		allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+		for _, cont := range allContainers {
+			if cont.SecurityContext != nil && cont.SecurityContext.RunAsUser != nil {
+				if int(*cont.SecurityContext.RunAsUser) != int(*pod.Spec.SecurityContext.RunAsUser) {
+					return admission.NewForbidden(attributes, errors.New("runAsUser at container level has to match the Pod level, if set"))
+				}
+			}
+		}
 		if pod.ObjectMeta.Annotations == nil {
 			pod.ObjectMeta.Annotations = map[string]string{}
 		}
