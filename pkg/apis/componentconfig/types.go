@@ -441,6 +441,8 @@ type KubeletConfiguration struct {
 	ExperimentalCheckNodeCapabilitiesBeforeMount bool `json:"ExperimentalCheckNodeCapabilitiesBeforeMount,omitempty"`
 	// This flag, if set, makes kubelet set Pod's hostname to its fqdn
 	TSHostnameFqdn bool `json:"TSHostnameFqdn,omitempty"`
+	// This flag, if set, makes kubelet generate custom /etc/resolv.conf file
+	TSCustomResolvConf bool `json:"TSCustomResolvConf,omitempty"`
 }
 
 type KubeSchedulerConfiguration struct {

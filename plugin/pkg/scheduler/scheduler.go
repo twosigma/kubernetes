@@ -158,9 +158,7 @@ func (s *Scheduler) scheduleOne() {
 			}
 		}
 	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
-		glog.V(3).Infof("userrunas is %s", user)
 		if assumed.ObjectMeta.Annotations[krbutils.TSPrestashTkt] == "true" {
-			glog.V(3).Infof("in prestash")
 			// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
 			realm := krbutils.KerberosRealm
 			// user/realm are specified, we should encrypt tickets and stick it inside
@@ -172,11 +170,7 @@ func (s *Scheduler) scheduleOne() {
 			} else {
 				tokenFile = tktPath
 			}
-		} else {
-			glog.V(3).Infof("NO prestash")
 		}
-	} else {
-		glog.V(3).Infof("NO user")
 	}
 
 	if tokenFile != "" {

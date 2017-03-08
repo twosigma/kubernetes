@@ -47,6 +47,9 @@ const (
 	// Kerberos realm
 	KerberosRealm = "N.TWOSIGMA.COM"
 
+	// additional search domain to be added to container's /etc/resolv.conf
+	AdditionalSearchDomain = "app.twosigma.com twosigma.com"
+
 	// keytab subdirectory within Pod's directory on the host
 	KeytabDirForPod = "keytabs"
 
@@ -70,6 +73,12 @@ const (
 
 	// ticket subdirectory within Pod's directory on the host
 	TicketDirForPod = "tkt"
+
+	// resolve.conf subdirectory within Pod's directory on the host
+	ResolvePathForPod = "resolv.conf"
+
+	// resolve.conf subdirectory within Pod's directory on the host
+	ResolvePathInPod = "/etc/resolv.conf"
 
 	// keytab path inside of Pod
 	KeytabPathInPod = "/var/spool/keytabs"

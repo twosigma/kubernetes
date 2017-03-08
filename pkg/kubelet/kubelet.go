@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1263,7 +1264,7 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 	return mounts, nil
 }
 
-func makeTSMounts(pod *api.Pod, podDir string, podIP string, clusterDomain, nodeHostname string, podServiceClusters []string) ([]kubecontainer.Mount, error) {
+func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clusterDomain, nodeHostname string, podServiceClusters []string, customResolvConf bool) ([]kubecontainer.Mount, error) {
 	tsMounts := []kubecontainer.Mount{}
 
 	// Set up Kerberos ticket
@@ -1333,16 +1334,68 @@ func makeTSMounts(pod *api.Pod, podDir string, podIP string, clusterDomain, node
 		}
 	}
 
-	// create custom TS resolve conf
-	/*	tktMount, err := makeTktMount(podDir, user, tkt)
+	if customResolvConf {
+		// create custom TS resolve conf
+		glog.V(5).Infof("creating custom resolv.conf for Pod %s", pod.Name)
+		resolveMount, err := kl.makeResolveMount(podDir, pod.Namespace, clusterDomain)
 		if err != nil {
-			glog.Errorf("unable to create ticket mount: %v", err)
+			glog.Errorf("unable to create resolve mount: %v", err)
 			return nil, err
 		} else {
-			tsMounts = append(tsMounts, *tktMount)
+			tsMounts = append(tsMounts, *resolveMount)
 		}
-	*/
+	} else {
+		glog.V(5).Infof("not creating custom resolv.conf for Pod %s", pod.Name)
+	}
+
 	return tsMounts, nil
+}
+
+func (kl *Kubelet) makeResolveMount(podDir, podNamespace, clusterDomain string) (*kubecontainer.Mount, error) {
+	resolveFilePath := path.Join(podDir, krbutils.ResolvePathForPod)
+	if err := kl.createResolveFile(resolveFilePath, podNamespace, clusterDomain); err != nil {
+		return nil, err
+	}
+	return &kubecontainer.Mount{
+		Name:          "resolv",
+		ContainerPath: krbutils.ResolvePathInPod,
+		HostPath:      resolveFilePath,
+		ReadOnly:      false,
+	}, nil
+}
+
+func (kl *Kubelet) createResolveFile(resolveFilePath, podNamespace, clusterDomain string) error {
+	var buffer bytes.Buffer
+	buffer.WriteString("# Kubernetes-managed TS specific resolve.conf file.\n")
+	buffer.WriteString(fmt.Sprintf("search %s.svc.%s svc.%s %s\n", podNamespace, clusterDomain,
+		clusterDomain, krbutils.AdditionalSearchDomain))
+	var hostDNS []string
+	// Get host DNS settings
+	if kl.resolverConfig != "" {
+		f, err := os.Open(kl.resolverConfig)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		hostDNS, _, err = kl.parseResolvConf(f)
+		if err != nil {
+			return err
+		}
+		// TS mod, ignore link local dns resolvers to skip unbound
+		hostDNS = Filter(hostDNS, func(v string) bool {
+			return !strings.HasPrefix(v, "127.")
+		})
+		for _, nameserverIP := range hostDNS {
+			buffer.WriteString(fmt.Sprintf("nameserver %s\n", nameserverIP))
+		}
+	} else {
+		glog.Errorf("error getting DNS servers")
+		return errors.New("Could not get DNS server IPs from host resolv.conf ")
+	}
+	buffer.WriteString("options edns0 ndots:0\n")
+	buffer.WriteString("options ndots:5\n")
+	return ioutil.WriteFile(resolveFilePath, buffer.Bytes(), 0644)
 }
 
 // exporting to enable REST server to have access to the cluster domain for Kerberos keytab extraction and split
@@ -1542,6 +1595,48 @@ func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hos
 	}
 }
 
+// retrieve Kerberos key versions present in the keytab file
+func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, error) {
+	keyVersions := map[string]int{}
+	// list all entries in the keytab file
+	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilePath + "\nlist\nq\n"}, []string{})
+	if err != nil {
+		glog.Errorf("exec with pipe failed, error %v", err)
+		return nil, err
+	}
+	if errb.Len() > 0 {
+		glog.Errorf("unable to list keys in keytab file %s, output %s, error %s", keytabFilePath, outb.String(), errb.String())
+		return nil, errors.New(outb.String() + " " + errb.String())
+	}
+	re := regexp.MustCompile("  +")
+	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
+
+	for c := len(keyArray) - 1; c >= 0; c-- {
+		key := strings.Trim(keyArray[c], " ")
+		// skip header outputed by the ktutil
+		if c < 4 {
+			continue
+		}
+		items := strings.Split(key, " ")
+		// skip irrelevant parts of the klist output
+		if len(items) != 3 {
+			continue
+		}
+		if keyVersion, err := strconv.Atoi(items[1]); err != nil {
+			glog.Errorf("could not convert key version %s to integer, error: %+v", items[1], err)
+		} else {
+			if existingKeyVersion, ok := keyVersions[items[2]]; ok {
+				if keyVersion > existingKeyVersion {
+					keyVersions[items[2]] = keyVersion
+				}
+			} else {
+				keyVersions[items[2]] = keyVersion
+			}
+		}
+	}
+	return keyVersions, nil
+}
+
 // This function is additonal fail-safe. It will check if Pod got all of the Kerberos keytab principals it needs and will
 // invoke callback REST API if it did not. The reason for this is that sometimes the security subsystem (krb5_keytab tool)
 // fails to trigger callback.
@@ -1565,46 +1660,42 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	}
 	glog.V(4).Infof("veryfing keytab for POD %s with podDir %s and principals %+v",
 		pod.Name, podDir, principals)
-
-	// list all entries in the keytab file
-	outb, errb, err := krbutils.ExecWithPipe("printf", "/usr/bin/ktutil", []string{"rkt " + podKeytabPath + "\nlist\nq\n"}, []string{})
+	podKeyVersions, err := getKeyVersionsFromKeytab(podKeytabPath)
 	if err != nil {
-		glog.Errorf("exec with pipe failed, error %v", err)
+		glog.Errorf("Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", podKeytabPath, pod.Name, err)
 		return err
 	}
-	if errb.Len() > 0 {
-		glog.Errorf("unable to list keys in keytab file %s, output %s, error %s", podKeytabPath, outb.String(), errb.String())
-		return errors.New(outb.String() + " " + errb.String())
+	hostKeyVersions, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
+	if err != nil {
+		glog.Errorf("Retrieval of keytab key versions from host keytab file %s failed, error: %+v", podKeytabPath, err)
+		return err
 	}
-	glog.V(4).Infof("starting verification of keytab file of Pod %s", pod.Name)
-	re := regexp.MustCompile("  +")
-	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
-	presentPrincipals := map[string]bool{}
-	for c := len(keyArray) - 1; c >= 0; c-- {
-		key := strings.Trim(keyArray[c], " ")
-		// skip header outputed by the ktutil
-		if c < 4 {
-			continue
-		}
-		items := strings.Split(key, " ")
-		// skip irrelevant parts of the klist output
-		if len(items) != 3 {
-			continue
-		}
-		presentPrincipals[items[2]] = true
-	}
-	// check if all expected principals are in the Pod's keytab
+	// check if all expected principals are in the Pod's keytab and also if the key versions in the Pod keytab match the newest
+	// versions in the keytab file on the host
 	missingPrincipals := map[string]bool{}
+	oldKey := false
 	for expectedPrincipal, _ := range principals {
-		if !presentPrincipals[expectedPrincipal] {
+		if podKeyVersion, ok := podKeyVersions[expectedPrincipal]; !ok {
 			glog.Errorf("detected missing principal %s for pod %s", expectedPrincipal, pod.Name)
 			missingPrincipals[expectedPrincipal] = true
 		} else {
-			glog.V(5).Infof("expected principal %s for pod %s was found", expectedPrincipal, pod.Name)
+			if hostKeyVersion, ok := hostKeyVersions[expectedPrincipal]; !ok {
+				glog.Errorf("detected key in Pod keytab not present in host keytab, principal %s", expectedPrincipal)
+
+			} else if hostKeyVersion != podKeyVersion {
+				glog.V(2).Infof("expected principal %s for pod %s has version %d in Pod and version %d in host file, need to fix",
+					expectedPrincipal, pod.Name, podKeyVersion, hostKeyVersion)
+				oldKey = true
+			} else {
+				glog.V(5).Infof("expected principal %s for pod %s was found with key version %d", expectedPrincipal, pod.Name, podKeyVersion)
+			}
 		}
 	}
-	if len(missingPrincipals) > 0 {
-		glog.V(2).Infof("attempting to fix missing principals for Pod %s", pod.Name)
+
+	// if any requested principals are missing or key version in Pod is older than in host keytab file,
+	// trigger the fix by invoking kubelet keytab distribution
+	if len(missingPrincipals) > 0 || oldKey {
+		glog.V(2).Infof("attempting to fix missing or expired (older key version) principals for Pod %s", pod.Name)
 		// repair by calling our callback function in the kubelet server.go thread
 		// this assumes that the reason for failure is lack of callback from the security subsystem
 		data := url.Values{}
@@ -1978,7 +2069,8 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 		glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
 		return nil, err
 	} else {
-		if tsMounts, err := makeTSMounts(pod, kl.getPodDir(pod.UID), podIP, kl.clusterDomain, kl.hostname, podServiceClusters); err != nil {
+		if tsMounts, err := kl.makeTSMounts(pod, kl.getPodDir(pod.UID), podIP, kl.clusterDomain, kl.hostname,
+			podServiceClusters, kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
 			glog.Errorf("unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
 			return nil, err
 		} else {

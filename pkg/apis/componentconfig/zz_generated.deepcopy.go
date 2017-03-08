@@ -352,6 +352,7 @@ func DeepCopy_componentconfig_KubeletConfiguration(in interface{}, out interface
 		}
 		out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
 		out.TSHostnameFqdn = in.TSHostnameFqdn
+		out.TSCustomResolvConf = in.TSCustomResolvConf
 		return nil
 	}
 }
