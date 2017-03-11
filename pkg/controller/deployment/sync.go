@@ -30,6 +30,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 	deploymentutil "k8s.io/kubernetes/pkg/controller/deployment/util"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	labelsutil "k8s.io/kubernetes/pkg/util/labels"
 	podutil "k8s.io/kubernetes/pkg/util/pod"
 	rsutil "k8s.io/kubernetes/pkg/util/replicaset"
@@ -268,11 +269,16 @@ func (dc *DeploymentController) getNewReplicaSet(deployment *extensions.Deployme
 	// Add podTemplateHash label to selector.
 	newRSSelector := labelsutil.CloneSelectorAndAddLabel(deployment.Spec.Selector, extensions.DefaultDeploymentUniqueLabelKey, podTemplateSpecHash)
 
+	// TS mod - limit the length of the RS name as to be able to fit in 64 bytes limit of hostname while settign it to FQDN
+	rsName := fmt.Sprintf("%d", podTemplateSpecHash)
+	if len(rsName) > krbutils.RSMaxNameLength {
+		rsName = rsName[:krbutils.RSMaxNameLength]
+	}
 	// Create new ReplicaSet
 	newRS := extensions.ReplicaSet{
 		ObjectMeta: api.ObjectMeta{
 			// Make the name deterministic, to ensure idempotence
-			Name:      deployment.Name + "-" + fmt.Sprintf("%d", podTemplateSpecHash),
+			Name:      deployment.Name + "-" + rsName,
 			Namespace: namespace,
 		},
 		Spec: extensions.ReplicaSetSpec{

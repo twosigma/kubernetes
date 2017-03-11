@@ -50,6 +50,9 @@ const (
 	// additional search domain to be added to container's /etc/resolv.conf
 	AdditionalSearchDomain = "app.twosigma.com twosigma.com"
 
+	// replica-set name max length
+	RSMaxNameLength = 6
+
 	// keytab subdirectory within Pod's directory on the host
 	KeytabDirForPod = "keytabs"
 
@@ -144,7 +147,7 @@ func GetRunAsUsername(pod *api.Pod) (string, error) {
 // Get domain name of the Pod (additional one allowing to address Pod's by their name)
 // kube-dns has been modified to register these names in skydns
 func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
-	return pod.Namespace + ".pods." + clusterDomain
+	return pod.Namespace + "." + clusterDomain
 }
 
 // Get Kerberos KDC cluster name for the Pod
