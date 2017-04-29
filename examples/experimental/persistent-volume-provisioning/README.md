@@ -1,6 +1,6 @@
 ## Persistent Volume Provisioning
 
-This example shows how to use experimental persistent volume provisioning.
+This example shows how to use dynamic persistent volume provisioning.
 
 ### Prerequisites
 
@@ -63,6 +63,30 @@ parameters:
 
 * `diskformat`: `thin`, `zeroedthick` and `eagerzeroedthick`. See vSphere docs for details. Default: `"thin"`.
 
+#### Portworx Volume
+
+```yaml
+kind: StorageClass
+apiVersion: storage.k8s.io/v1beta1
+metadata:
+  name: portworx-io-priority-high
+provisioner: kubernetes.io/portworx-volume
+parameters:
+  repl: "1"
+  snap_interval:   "70"
+  io_priority:  "high"
+
+```
+
+*  `fs`: filesystem to be laid out: none|xfs|ext4 (default: `ext4`)
+*  `block_size`: block size in Kbytes (default: `32`)
+*  `repl`: replication factor [1..3] (default: `1`)
+*  `io_priority`: IO Priority: [high|medium|low] (default: `low`)
+*  `snap_interval`: snapshot interval in minutes, 0 disables snaps (default: `0`)
+*  `aggregation_level`: specifies the number of chunks the volume would be distributed into, 0 indicates a non-aggregated volume (default: `0`)
+*  `ephemeral`: ephemeral storage [true|false] (default `false`)
+
+For a complete example refer ([Portworx Volume docs](../../volumes/portworx/README.md))
 
 #### GLUSTERFS
 
@@ -74,9 +98,13 @@ metadata:
 provisioner: kubernetes.io/glusterfs
 parameters:
   resturl: "http://127.0.0.1:8081"
+  clusterid: "630372ccdc720a92c681fb928f27b53f"
   restuser: "admin"
   secretNamespace: "default"
   secretName: "heketi-secret"
+  gidMin: "40000"
+  gidMax: "50000"
+  volumetype: "replicate:3"
 ```
 
 * `resturl` : Gluster REST service/Heketi service url which provision gluster volumes on demand. The general format should be `IPaddress:Port` and this is a mandatory parameter for GlusterFS dynamic provisioner. If Heketi service is exposed as a routable service in openshift/kubernetes setup, this can have a format similar to
@@ -85,10 +113,24 @@ parameters:
 * `restuser` : Gluster REST service/Heketi user who has access to create volumes in the Gluster Trusted Pool.
 * `restuserkey` : Gluster REST service/Heketi user's password which will be used for authentication to the REST server. This parameter is deprecated in favor of `secretNamespace` + `secretName`.
 * `secretNamespace` + `secretName` : Identification of Secret instance that containes user password to use when talking to Gluster REST service. These parameters are optional, empty password will be used when both `secretNamespace` and `secretName` are omitted. The provided secret must have type "kubernetes.io/glusterfs".
-
 When both `restuserkey` and `secretNamespace` + `secretName` is specified, the secret will be used.
+* `clusterid`: `630372ccdc720a92c681fb928f27b53f` is the ID of the cluster which will be used by Heketi when provisioning the volume. It can also be a list of clusterids, for ex:
+"8452344e2becec931ece4e33c4674e4e,42982310de6c63381718ccfa6d8cf397". This is an optional parameter.
 
 Example of a secret can be found in [glusterfs-provisioning-secret.yaml](glusterfs-provisioning-secret.yaml).
+
+* `gidMin` + `gidMax` : The minimum and maximum value of GID range for the storage class. A unique value (GID) in this range ( gidMin-gidMax ) will be used for dynamically provisioned volumes. These are optional values. If not specified, the volume will be provisioned with a value between 2000-2147483647 which are defaults for gidMin and gidMax respectively.
+
+* `volumetype` : The volume type and it's parameters can be configured with this optional value. If the volume type is not mentioned, it's up to the provisioner to decide the volume type.
+For example:
+  'Replica volume':
+    `volumetype: replicate:3` where '3' is replica count.
+  'Disperse/EC volume':
+    `volumetype: disperse:4:2` where '4' is data and '2' is the redundancy count.
+  'Distribute volume':
+    `volumetype: none`
+
+For available volume types and it's administration options refer: ([Administration Guide](https://access.redhat.com/documentation/en-US/Red_Hat_Storage/3.1/html/Administration_Guide/part-Overview.html))
 
 Reference : ([How to configure Heketi](https://github.com/heketi/heketi/wiki/Setting-up-the-topology))
 
@@ -245,7 +287,7 @@ parameters:
 ### User provisioning requests
 
 Users request dynamically provisioned storage by including a storage class in their `PersistentVolumeClaim`.
-The annotation `volume.beta.kubernetes.io/storage-class` is used to access this experimental feature. It is required that this value matches the name of a `StorageClass` configured by the administrator.
+The annotation `volume.beta.kubernetes.io/storage-class` is used to access this feature. It is required that this value matches the name of a `StorageClass` configured by the administrator.
 In the future, the storage class may remain in an annotation or become a field on the claim itself.
 
 ```
@@ -329,10 +371,10 @@ First we must identify the Ceph client admin key. This is usually found in `/etc
   caps osd = "allow *"
 ```
 
-From the key value, we will create a secret. We must create the Ceph admin Secret in the namespace defined in our `StorageClass`. In this example we set the namespace to `kube-system`.
+From the key value, we will create a secret. We must create the Ceph admin Secret in the namespace defined in our `StorageClass`. In this example we've set the namespace to `kube-system`.
 
 ```
-$ kubectl create secret generic ceph-secret-admin --from-literal=key='AQBfxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx==' --namespace=kube-system
+$ kubectl create secret generic ceph-secret-admin --from-literal=key='AQBfxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx==' --namespace=kube-system --type=kubernetes.io/rbd
 ```
 
 Now modify `examples/experimental/persistent-volume-provisioning/rbd/rbd-storage-class.yaml` to reflect your environment, particularly the `monitors` field.  We are now ready to create our RBD Storage Class:
@@ -341,7 +383,7 @@ Now modify `examples/experimental/persistent-volume-provisioning/rbd/rbd-storage
 $ kubectl create -f examples/experimental/persistent-volume-provisioning/rbd/rbd-storage-class.yaml
 ```
 
-The kube-controller-manager is now able to provision storage, however we still need to be able to map it. Mapping should be done with a non-privileged key, if you have existing users you can get all keys by running `ceph auth list` on your Ceph cluster with the admin key. For this example we will create a new user and pool.
+The kube-controller-manager is now able to provision storage, however we still need to be able to map the RBD volume to a node. Mapping should be done with a non-privileged key, if you have existing users you can get all keys by running `ceph auth list` on your Ceph cluster with the admin key. For this example we will create a new user and pool.
 
 ```
 $ ceph osd pool create kube 512
@@ -350,9 +392,18 @@ $ ceph auth get-or-create client.kube mon 'allow r' osd 'allow rwx pool=kube'
 	key = AQBQyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy==
 ```
 
+This key will be made into a secret, just like the admin secret. However this user secret will need to be created in every namespace where you intend to consume RBD volumes provisioned in our example storage class. Let's create a namespace called `myns`, and create the user secret in that namespace.
+
+```
+kubectl create namespace myns
+kubectl create secret generic ceph-secret-user --from-literal=key='AQBQyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy==' --namespace=myns --type=kubernetes.io/rbd
+```
+
+You are now ready to provision and use RBD storage.
+
 ##### Usage
 
-Once configured, create a PVC in a user's namespace (e.g. myns):
+With the storageclass configured, let's create a PVC in our example namespace, `myns`:
 
 ```
 $ kubectl create -f examples/experimental/persistent-volume-provisioning/claim1.json --namespace=myns
@@ -406,6 +457,8 @@ $ export PODNAME=`kubectl get pod --selector='role=server' --namespace=myns --ou
 $ kubectl exec -it $PODNAME --namespace=myns -- df -h | grep rbd
 /dev/rbd1       2.9G  4.5M  2.8G   1% /var/lib/www/html
 ```
+
+
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/examples/experimental/persistent-volume-provisioning/README.md?pixel)]()

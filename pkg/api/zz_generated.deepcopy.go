@@ -155,6 +155,7 @@ func RegisterDeepCopies(scheme *runtime.Scheme) error {
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PodTemplate, InType: reflect.TypeOf(&PodTemplate{})},
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PodTemplateList, InType: reflect.TypeOf(&PodTemplateList{})},
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PodTemplateSpec, InType: reflect.TypeOf(&PodTemplateSpec{})},
+		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PortworxVolumeSource, InType: reflect.TypeOf(&PortworxVolumeSource{})},
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_Preconditions, InType: reflect.TypeOf(&Preconditions{})},
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PreferAvoidPodsEntry, InType: reflect.TypeOf(&PreferAvoidPodsEntry{})},
 		conversion.GeneratedDeepCopyFunc{Fn: DeepCopy_api_PreferredSchedulingTerm, InType: reflect.TypeOf(&PreferredSchedulingTerm{})},
@@ -2298,6 +2299,13 @@ func DeepCopy_api_PersistentVolumeSource(in interface{}, out interface{}, c *con
 		} else {
 			out.PhotonPersistentDisk = nil
 		}
+		if in.PortworxVolume != nil {
+			in, out := &in.PortworxVolume, &out.PortworxVolume
+			*out = new(PortworxVolumeSource)
+			**out = **in
+		} else {
+			out.PortworxVolume = nil
+		}
 		return nil
 	}
 }
@@ -2849,6 +2857,17 @@ func DeepCopy_api_PodTemplateSpec(in interface{}, out interface{}, c *conversion
 		if err := DeepCopy_api_PodSpec(&in.Spec, &out.Spec, c); err != nil {
 			return err
 		}
+		return nil
+	}
+}
+
+func DeepCopy_api_PortworxVolumeSource(in interface{}, out interface{}, c *conversion.Cloner) error {
+	{
+		in := in.(*PortworxVolumeSource)
+		out := out.(*PortworxVolumeSource)
+		out.VolumeID = in.VolumeID
+		out.FSType = in.FSType
+		out.ReadOnly = in.ReadOnly
 		return nil
 	}
 }
@@ -3776,6 +3795,13 @@ func DeepCopy_api_VolumeSource(in interface{}, out interface{}, c *conversion.Cl
 			**out = **in
 		} else {
 			out.PhotonPersistentDisk = nil
+		}
+		if in.PortworxVolume != nil {
+			in, out := &in.PortworxVolume, &out.PortworxVolume
+			*out = new(PortworxVolumeSource)
+			**out = **in
+		} else {
+			out.PortworxVolume = nil
 		}
 		return nil
 	}

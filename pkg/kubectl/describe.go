@@ -576,6 +576,8 @@ func describeVolumes(volumes []api.Volume, out io.Writer, space string) {
 			printCinderVolumeSource(volume.VolumeSource.Cinder, out)
 		case volume.VolumeSource.PhotonPersistentDisk != nil:
 			printPhotonPersistentDiskVolumeSource(volume.VolumeSource.PhotonPersistentDisk, out)
+		case volume.VolumeSource.PortworxVolume != nil:
+			printPortworxVolumeSource(volume.VolumeSource.PortworxVolume, out)
 		default:
 			fmt.Fprintf(out, "  <unknown>\n")
 		}
@@ -652,6 +654,12 @@ func printISCSIVolumeSource(iscsi *api.ISCSIVolumeSource, out io.Writer) {
 		"    FSType:\t%v\n"+
 		"    ReadOnly:\t%v\n",
 		iscsi.TargetPortal, iscsi.IQN, iscsi.Lun, iscsi.ISCSIInterface, iscsi.FSType, iscsi.ReadOnly)
+}
+
+func printPortworxVolumeSource(pwxVolume *api.PortworxVolumeSource, out io.Writer) {
+	fmt.Fprintf(out, "Type:\tPortworxVolume (a Portworx Volume resource)\n"+
+		"    VolumeID:\t%v\n",
+		pwxVolume.VolumeID)
 }
 
 func printGlusterfsVolumeSource(glusterfs *api.GlusterfsVolumeSource, out io.Writer) {
@@ -786,6 +794,8 @@ func (d *PersistentVolumeDescriber) Describe(namespace, name string, describerSe
 			printAzureDiskVolumeSource(pv.Spec.AzureDisk, out)
 		case pv.Spec.PhotonPersistentDisk != nil:
 			printPhotonPersistentDiskVolumeSource(pv.Spec.PhotonPersistentDisk, out)
+		case pv.Spec.PortworxVolume != nil:
+			printPortworxVolumeSource(pv.Spec.PortworxVolume, out)
 		}
 
 		if events != nil {

@@ -291,6 +291,9 @@ type VolumeSource struct {
 	AzureDisk *AzureDiskVolumeSource `json:"azureDisk,omitempty"`
 	// PhotonPersistentDisk represents a Photon Controller persistent disk attached and mounted on kubelets host machine
 	PhotonPersistentDisk *PhotonPersistentDiskVolumeSource `json:"photonPersistentDisk,omitempty"`
+	// PortworxVolume represents a portworx volume attached and mounted on kubelets host machine
+	// +optional
+	PortworxVolume *PortworxVolumeSource `json:"portworxVolume,omitempty"`
 }
 
 // Similar to VolumeSource but meant for the administrator who creates PVs.
@@ -353,6 +356,9 @@ type PersistentVolumeSource struct {
 	AzureDisk *AzureDiskVolumeSource `json:"azureDisk,omitempty"`
 	// PhotonPersistentDisk represents a Photon Controller persistent disk attached and mounted on kubelets host machine
 	PhotonPersistentDisk *PhotonPersistentDiskVolumeSource `json:"photonPersistentDisk,omitempty"`
+	// PortworxVolume represents a portworx volume attached and mounted on kubelets host machine
+	// +optional
+	PortworxVolume *PortworxVolumeSource `json:"portworxVolume,omitempty"`
 }
 
 type PersistentVolumeClaimVolumeSource struct {
@@ -948,6 +954,21 @@ type PhotonPersistentDiskVolumeSource struct {
 	// Must be a filesystem type supported by the host operating system.
 	// Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.
 	FSType string `json:"fsType,omitempty"`
+}
+
+// PortworxVolumeSource represents a Portworx volume resource.
+type PortworxVolumeSource struct {
+	// VolumeID uniquely identifies a Portworx volume
+	VolumeID string
+	// FSType represents the filesystem type to mount
+	// Must be a filesystem type supported by the host operating system.
+	// Ex. "ext4", "xfs". Implicitly inferred to be "ext4" if unspecified.
+	// +optional
+	FSType string
+	// Defaults to false (read/write). ReadOnly here will force
+	// the ReadOnly setting in VolumeMounts.
+	// +optional
+	ReadOnly bool
 }
 
 type AzureDataDiskCachingMode string
