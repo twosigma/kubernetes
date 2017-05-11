@@ -173,10 +173,10 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clust
 	// Set up Kerberos ticket
 	if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {
 		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
-			glog.V(5).Infof("delegated ticket found in pod spec for user %s: %s", user, tkt)
-			tktMount, err := makeTktMount(podDir, user, tkt)
+			glog.V(5).Infof(krbutils.TSL+"delegated ticket found in pod spec for user %s: %s", user, tkt)
+			tktMount, err := kl.makeTktMount(podDir, user, tkt, pod)
 			if err != nil {
-				glog.Errorf("unable to create ticket mount: %v", err)
+				glog.Errorf(krbutils.TSE+"unable to create ticket mount: %v", err)
 				return nil, err
 			} else {
 				tsMounts = append(tsMounts, *tktMount)
@@ -206,39 +206,39 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clust
 
 		podKDCClusters, err := kl.GetAllPodKDCClusterNames(pod)
 		if err != nil {
-			glog.Errorf("error while getting KDC clusters for the POD %s, error: %v", pod.Name, err)
+			glog.Errorf(krbutils.TSE+"error while getting KDC clusters for the POD %s, error: %v", pod.Name, err)
 			return nil, err
 		}
 
 		if needKeytabs || needCerts {
 			// create required KDC clusters and join the node to them. Also, if services != "" then request keytabs and
 			// create bind mount for keytab file.
-			glog.V(5).Infof("managing KDC clusters for keytabs/certs for the Pod %s user %s and services %+v", pod.Name, user, services)
+			glog.V(5).Infof(krbutils.TSL+"managing KDC clusters for keytabs/certs for the Pod %s user %s and services %+v", pod.Name, user, services)
 			tktMount, err := kl.makeKeytabMount(podDir, clusterDomain, pod, services, nodeHostname, realm, podKDCClusters, user)
 			if err != nil {
-				glog.Errorf("unable to create keytab for Pod %s user %s and services %s: %+v", pod.Name, user, services, err)
+				glog.Errorf(krbutils.TSE+"unable to create keytab for Pod %s user %s and services %s: %+v", pod.Name, user, services, err)
 				return nil, err
 			} else {
 				if tktMount != nil {
 					tsMounts = append(tsMounts, *tktMount)
-					glog.V(5).Infof("keytab for the Pod %s user %s and services %+v created", pod.Name, user, services)
+					glog.V(5).Infof(krbutils.TSL+"keytab for the Pod %s user %s and services %+v created", pod.Name, user, services)
 				} else {
-					glog.V(5).Infof("KDC clusters for the Pod %s user %s created, but no keytab since services empty", pod.Name, user)
+					glog.V(5).Infof(krbutils.TSL+"KDC clusters for the Pod %s user %s created, but no keytab since services empty", pod.Name, user)
 				}
 			}
 		}
 
 		if needCerts {
 			// create certificates
-			glog.V(5).Infof("creating certs for the Pod %s and user %s", pod.Name, user)
-			certsMount, err := makeCertMount(podDir, clusterDomain, pod, nodeHostname, realm,
+			glog.V(5).Infof(krbutils.TSL+"creating certs for the Pod %s and user %s", pod.Name, user)
+			certsMount, err := kl.makeCertMount(podDir, clusterDomain, pod, nodeHostname, realm,
 				podKDCClusters, user)
 			if err != nil {
-				glog.Errorf("unable to create certs for Pod %s and user %s, error %+v", pod.Name, user, err)
+				glog.Errorf(krbutils.TSE+"unable to create certs for Pod %s and user %s, error %+v", pod.Name, user, err)
 				return nil, err
 			} else {
 				tsMounts = append(tsMounts, *certsMount)
-				glog.V(5).Infof("created certs for the Pod %s and user %s", pod.Name, user)
+				glog.V(5).Infof(krbutils.TSL+"created certs for the Pod %s and user %s", pod.Name, user)
 			}
 		}
 	}
@@ -250,32 +250,55 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clust
 		if v.VolumeSource.HostPath != nil {
 			if v.VolumeSource.HostPath.Path == "/etc/k8s-resolv.conf" {
 				skipResolvConf = true
-				glog.V(5).Infof("Pod declares resolv.conf, skipping the custom resolv.conf %s", pod.Name)
+				glog.V(5).Infof(krbutils.TSL+"Pod declares resolv.conf, skipping the custom resolv.conf %s", pod.Name)
 			}
 		}
 	}
 
 	if customResolvConf && !skipResolvConf {
 		// create custom TS resolve conf
-		glog.V(5).Infof("creating custom resolv.conf for Pod %s", pod.Name)
-		resolveMount, err := kl.makeResolveMount(podDir, pod.Namespace, clusterDomain)
+		glog.V(5).Infof(krbutils.TSL+"creating custom resolv.conf for Pod %s", pod.Name)
+		resolveMount, err := kl.makeResolveMount(podDir, pod.Namespace, clusterDomain, pod)
 		if err != nil {
-			glog.Errorf("unable to create resolve mount: %v", err)
+			glog.Errorf(krbutils.TSE+"unable to create resolve mount: %v", err)
 			return nil, err
 		} else {
 			tsMounts = append(tsMounts, *resolveMount)
 		}
 	} else {
-		glog.V(5).Infof("not creating custom resolv.conf for Pod %s", pod.Name)
+		glog.V(5).Infof(krbutils.TSL+"not creating custom resolv.conf for Pod %s", pod.Name)
 	}
 
 	return tsMounts, nil
 }
 
-func (kl *Kubelet) makeResolveMount(podDir, podNamespace, clusterDomain string) (*kubecontainer.Mount, error) {
+func checkFileExists(path string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	} else {
+		return true, nil
+	}
+}
+
+func (kl *Kubelet) makeResolveMount(podDir, podNamespace, clusterDomain string, pod *api.Pod) (*kubecontainer.Mount, error) {
 	resolveFilePath := path.Join(podDir, krbutils.ResolvePathForPod)
-	if err := kl.createResolveFile(resolveFilePath, podNamespace, clusterDomain); err != nil {
+	// check if the file already exists (we need to do it only for the first container)
+	exists, err := checkFileExists(resolveFilePath)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"checking if file exists failed %v", err)
 		return nil, err
+	}
+	if !exists {
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_RESOLVE_MOUNT_START", "POD %s", pod.Name)
+		if err := kl.createResolveFile(resolveFilePath, podNamespace, clusterDomain); err != nil {
+			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_RESOLVE_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
+			return nil, err
+		}
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_RESOLVE_MOUNT_END", "POD %s", pod.Name)
 	}
 	return &kubecontainer.Mount{
 		Name:          "resolv",
@@ -287,10 +310,8 @@ func (kl *Kubelet) makeResolveMount(podDir, podNamespace, clusterDomain string) 
 
 func (kl *Kubelet) createResolveFile(resolveFilePath, podNamespace, clusterDomain string) error {
 	var buffer bytes.Buffer
-	buffer.WriteString("# Kubernetes-managed TS specific resolve.conf file.\n")
-	buffer.WriteString(fmt.Sprintf("search %s.svc.%s svc.%s %s\n", podNamespace, clusterDomain,
-		clusterDomain, krbutils.AdditionalSearchDomain))
 	var hostDNS []string
+	var searchDomains []string
 	// Get host DNS settings
 	if kl.resolverConfig != "" {
 		f, err := os.Open(kl.resolverConfig)
@@ -299,10 +320,17 @@ func (kl *Kubelet) createResolveFile(resolveFilePath, podNamespace, clusterDomai
 		}
 		defer f.Close()
 
-		hostDNS, _, err = kl.parseResolvConf(f)
+		hostDNS, searchDomains, err = kl.parseResolvConf(f)
 		if err != nil {
 			return err
 		}
+
+		buffer.WriteString("# Kubernetes-managed TS specific resolve.conf file.\n")
+		buffer.WriteString(fmt.Sprintf("search %s.svc.%s svc.%s", podNamespace, clusterDomain, clusterDomain))
+		for _, s := range searchDomains {
+			buffer.WriteString(fmt.Sprintf(" %s", s))
+		}
+		buffer.WriteString(fmt.Sprintf("\n"))
 		// TS mod, ignore link local dns resolvers to skip unbound
 		hostDNS = Filter(hostDNS, func(v string) bool {
 			return !strings.HasPrefix(v, "127.")
@@ -310,19 +338,29 @@ func (kl *Kubelet) createResolveFile(resolveFilePath, podNamespace, clusterDomai
 		for _, nameserverIP := range hostDNS {
 			buffer.WriteString(fmt.Sprintf("nameserver %s\n", nameserverIP))
 		}
+		buffer.WriteString("options edns0 ndots:0\n")
+		buffer.WriteString("options ndots:2\n")
+		return ioutil.WriteFile(resolveFilePath, buffer.Bytes(), 0644)
 	} else {
-		glog.Errorf("error getting DNS servers")
+		glog.Errorf(krbutils.TSE + "error getting DNS servers")
 		return errors.New("Could not get DNS server IPs from host resolv.conf ")
 	}
-	buffer.WriteString("options edns0 ndots:0\n")
-	buffer.WriteString("options ndots:5\n")
-	return ioutil.WriteFile(resolveFilePath, buffer.Bytes(), 0644)
 }
 
-func makeCertMount(podDir, clusterDomain string, pod *api.Pod, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
+func (kl *Kubelet) makeCertMount(podDir, clusterDomain string, pod *api.Pod, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
 	certsFilePath := path.Join(podDir, krbutils.CertsDirForPod)
-	if err := createCerts(certsFilePath, clusterDomain, pod, hostName, realm, podKDCClusters, user); err != nil {
+	exists, err := checkFileExists(certsFilePath)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"checking if file exists failed %v", err)
 		return nil, err
+	}
+	if !exists {
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_CERTS_MOUNT_START", "POD %s", pod.Name)
+		if err := createCerts(certsFilePath, clusterDomain, pod, hostName, realm, podKDCClusters, user); err != nil {
+			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_CERTS_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
+			return nil, err
+		}
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_CERTS_MOUNT_END", "POD %s", pod.Name)
 	}
 	return &kubecontainer.Mount{
 		Name:          "ts-certs",
@@ -337,10 +375,11 @@ func createCerts(dest, clusterDomain string, pod *api.Pod, hostName, realm strin
 	// refresh the actual certs file on the node
 	for clusterName, _ := range podKDCClusters {
 		// request creation of the certificate
-		glog.V(4).Infof("will refresh certificate for pod %s and cluster %s", pod.Name, clusterName)
 		if err := refreshCerts(clusterName, dest, user); err != nil {
-			glog.Errorf("error getting certs files for cluster %s, error: %v", clusterName, err)
+			glog.Errorf(krbutils.TSE+"error getting certs files for cluster %s, error: %v", clusterName, err)
 			return err
+		} else {
+			glog.V(5).Infof(krbutils.TSL+"certificate refreshed for pod %s and cluster %s", pod.Name, clusterName)
 		}
 	}
 	return nil
@@ -359,23 +398,23 @@ func refreshCerts(clusterName, certsDir, user string) error {
 	// indicating expired certificate
 	// TODO: check if we can change pwdb output to differentiate between expired cert and other error
 	if out, err := krbutils.RunCommand(krbutils.PwdbPath, "cert", "-e", "-h", clusterName); err != nil {
-		glog.Errorf("certificate files for cluster %s is expired (or other error happened), error: %v, output: %v",
+		glog.V(1).Infof(krbutils.TSL+"certificate files for cluster %s is expired (or other error happened), error: %v, output: %v",
 			clusterName, err, string(out))
 		// request the certs file refresh and retry if needed
 		for retry = 0; retry < krbutils.MaxKrb5RetryCount; retry++ {
 			if out, err := krbutils.RunCommand(krbutils.PwdbPath, "cert", "-h", clusterName); err != nil {
 				lastErr = err
 				lastOut = out
-				glog.Errorf("error creating certificate files for cluster %s during %d retry, error: %v, output: %v",
+				glog.V(2).Infof(krbutils.TSL+"TSRETRY error creating certificate files for cluster %s during %d retry, error: %v, output: %v",
 					clusterName, retry, err, string(out))
 				time.Sleep(krbutils.Krb5RetrySleepSec)
 			} else {
-				glog.V(5).Infof("certs have been fetched for cluster %s after %d retries, returned output %s with no error",
+				glog.V(5).Infof(krbutils.TSL+"certs have been fetched for cluster %s after %d retries, returned output %s with no error",
 					clusterName, retry, string(out))
 				break
 			}
 			if retry >= krbutils.MaxKrb5RetryCount {
-				glog.Errorf("error creating certificate files for cluster %s after %d retries, giving up, error: %v, output: %v",
+				glog.Errorf(krbutils.TSE+"error creating certificate files for cluster %s after %d retries, giving up, error: %v, output: %v",
 					clusterName, retry, lastErr, string(lastOut))
 				return lastErr
 			}
@@ -383,7 +422,7 @@ func refreshCerts(clusterName, certsDir, user string) error {
 		// TODO: mark the Pod indicating that certs were refreshed
 		// this can be used to restart the Pod or notify the user
 	} else {
-		glog.V(5).Infof("certificate files for cluster %s are fresh, no need to refresh, returned output %s with no error",
+		glog.V(5).Infof(krbutils.TSL+"certificate files for cluster %s are fresh, no need to refresh, returned output %s with no error",
 			clusterName, string(out))
 	}
 
@@ -394,80 +433,79 @@ func refreshCerts(clusterName, certsDir, user string) error {
 		"-p",
 		certsDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		glog.Errorf("unable to create Pod certs directory: %s %v", out, err)
+		glog.Errorf(krbutils.TSE+"unable to create Pod certs directory: %s %v", out, err)
 	}
 
 	// copy the files to the Pod certs directory
 	if certFiles, err := filepath.Glob(krbutils.HostCertsFile + "/" + clusterName + "*"); err != nil {
-		glog.Errorf("error listing cert files for cluster %s, error: %v", clusterName, err)
+		glog.Errorf(krbutils.TSE+"error listing cert files for cluster %s, error: %v", clusterName, err)
 		return err
 	} else {
 		for _, certFile := range certFiles {
-			glog.V(5).Infof("copying cert file %s to Pod's directory %s for cluster %s", certFile, certsDir, clusterName)
+			glog.V(5).Infof(krbutils.TSL+"copying cert file %s to Pod's directory %s for cluster %s", certFile, certsDir, clusterName)
 			if out, err := krbutils.RunCommand("/bin/cp", "-f", certFile, certsDir); err != nil {
-				glog.Errorf("error copying cert file %s to Pod's directory %s for cluster %s, error: %v, output: %s",
+				glog.Errorf(krbutils.TSE+"error copying cert file %s to Pod's directory %s for cluster %s, error: %v, output: %s",
 					certFile, clusterName, certsDir, err, string(out))
 				return err
 			} else {
-				glog.V(5).Infof("cert file %s have been copied to Pod's directory %s for cluster %s", certFile, certsDir, clusterName)
+				glog.V(5).Infof(krbutils.TSL+"cert file %s have been copied to Pod's directory %s for cluster %s", certFile, certsDir, clusterName)
 			}
 			certFileInPod := certsDir + "/" + filepath.Base(certFile)
 			err1 := os.Chmod(certFileInPod, 0600)
 			if err1 != nil {
-				glog.Errorf("error changing cert file %s permission to 0600, error: %v", certFileInPod, err1)
+				glog.Errorf(krbutils.TSE+"error changing cert file %s permission to 0600, error: %v", certFileInPod, err1)
 				return err1
 			}
 			owner := user + ":" + krbutils.TicketUserGroup
 			cmd = exe.Command(krbutils.ChownPath, owner, certFileInPod)
 			_, err1 = cmd.CombinedOutput()
 			if err1 != nil {
-				glog.Errorf("error changing owner of cert file %s to %s, error: %v", certFileInPod, owner, err1)
+				glog.Errorf(krbutils.TSE+"error changing owner of cert file %s to %s, error: %v", certFileInPod, owner, err1)
 				return err1
 			}
 		}
 	}
-	glog.V(5).Infof("all cert files have been copied to Pod's directory %s for cluster %s", certsDir, clusterName)
+	glog.V(5).Infof(krbutils.TSL+"all cert files have been copied to Pod's directory %s for cluster %s", certsDir, clusterName)
 	return nil
 }
 
 func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
+	if services == "" {
+		return nil, nil
+	}
 	keytabFilePath := path.Join(podDir, krbutils.KeytabDirForPod)
-	if err := kl.createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podKDCClusters, user); err != nil {
+	exists, err := checkFileExists(keytabFilePath)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"checking if file exists failed %v", err)
 		return nil, err
+	}
+	if !exists {
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_KEYTABS_MOUNT_START", "POD %s", pod.Name)
+		if err := kl.createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podKDCClusters, user); err != nil {
+			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_KEYTABS_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
+			return nil, err
+		}
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_KEYTABS_MOUNT_END", "POD %s", pod.Name)
 	}
 	// return mount only if at least one service was requested. Empty services indicate user asked for certs but not for keytabs in which case
 	// we manage KDC cluster membership but do not create actual keytabs and related bind mount
-	if services != "" {
-		return &kubecontainer.Mount{
-			Name:          "ts-keytab",
-			ContainerPath: krbutils.KeytabPathInPod,
-			HostPath:      keytabFilePath,
-			ReadOnly:      false,
-		}, nil
-	} else {
-		return nil, nil
-	}
+	return &kubecontainer.Mount{
+		Name:          "ts-keytab",
+		ContainerPath: krbutils.KeytabPathInPod,
+		HostPath:      keytabFilePath,
+		ReadOnly:      false,
+	}, nil
 }
 
 func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) error {
 	defer clock.ExecTime(time.Now(), "createKeytab", pod.Name)
 	var err error
+	var mutex *lock.Mutex
 	// retrieve keys and versions from the host keytab file
 	hostKeyVersions, clusterNames, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
-		glog.Errorf("Retrieval of keytab key versions from host keytab file %s failed, error: %+v", krbutils.HostKeytabFile, err)
+		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from host keytab file %s failed, error: %+v", krbutils.HostKeytabFile, err)
 		return err
-	}
-
-	var mutex *lock.Mutex
-	if kl.kubeletConfiguration.TSLockKerberos {
-		mutex, err = lock.NewMutex(
-			kl.kubeletConfiguration.TSLockEtcdServerList,
-			kl.kubeletConfiguration.TSLockEtcdCertFile,
-			kl.kubeletConfiguration.TSLockEtcdKeyFile,
-			kl.kubeletConfiguration.TSLockEtcdCAFile)
-	} else {
-		mutex = nil
 	}
 
 	// Refresh the actual keytab file on the node. The content relevant to this Pod will be extracted
@@ -478,26 +516,36 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 		// many times (per each Pod selected by the service).
 		// If the cluster already present in host keytab then node is already a member and no need to register.
 		if _, ok := clusterNames[clusterName]; !ok {
+			if kl.kubeletConfiguration.TSLockKerberos {
+				mutex, err = lock.NewMutex(
+					kl.kubeletConfiguration.TSLockEtcdServerList,
+					kl.kubeletConfiguration.TSLockEtcdCertFile,
+					kl.kubeletConfiguration.TSLockEtcdKeyFile,
+					kl.kubeletConfiguration.TSLockEtcdCAFile)
+			} else {
+				mutex = nil
+			}
+
 			//Register cluster in KDC
 			if err = krbutils.RegisterClusterInKDC(clusterName, mutex); err != nil {
-				glog.Errorf("error registering cluster %s in KDC, error: %+v", clusterName, err)
+				glog.Errorf(krbutils.TSE+"error registering cluster %s in KDC, error: %+v", clusterName, err)
 				return err
 			}
 			// Add node to the virtual cluster in KDC
 			if err := krbutils.AddHostToClusterInKDC(clusterName, hostName, mutex); err != nil {
-				glog.Errorf("error adding host %s to cluster %s in KDC, error: %v", hostName, clusterName, err)
+				glog.Errorf(krbutils.TSE+"error adding host %s to cluster %s in KDC, error: %v", hostName, clusterName, err)
 				return err
 			}
 		} else {
-			glog.V(4).Infof("node already a member of the cluster %s, skipped registration in KDC", clusterName)
+			glog.V(4).Infof(krbutils.TSL+"node already a member of the cluster %s, skipped registration in KDC", clusterName)
 		}
 		// we only request actual keytabs if the user asked for it. If no services requested then only
 		// KDC cluster membership is managed for certs.
 		if services != "" {
 			// request refresh of the keytab
-			glog.V(4).Infof("will refresh keytab for pod %s and cluster %s", pod.Name, clusterName)
+			glog.V(4).Infof(krbutils.TSL+"will refresh keytab for pod %s and cluster %s", pod.Name, clusterName)
 			if err := kl.refreshKeytab(clusterName, services, realm, hostKeyVersions); err != nil {
-				glog.Errorf("error getting keytab file for cluster %s and services %+v, error: %v", clusterName, services, err)
+				glog.Errorf(krbutils.TSE+"error getting keytab file for cluster %s and services %+v, error: %v", clusterName, services, err)
 				return err
 			}
 		}
@@ -509,7 +557,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 	// verify that the Pod got the service keytabs it asked for
 	// it is additional robustness if teh callback from krb5_keytab did not come
 	if err := verifyAndFixKeytab(pod, services, hostName, realm, podKDCClusters, dest, user); err != nil {
-		glog.Errorf("failed to fix and verify keytab for Pod %s, error: %+v", pod.Name, err)
+		glog.Errorf(krbutils.TSE+"failed to fix and verify keytab for Pod %s, error: %+v", pod.Name, err)
 		return err
 	} else {
 		return nil
@@ -531,11 +579,11 @@ func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string
 	// list all entries in the keytab file
 	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilePath + "\nlist\nq\n"}, []string{})
 	if err != nil {
-		glog.Errorf("exec with pipe failed, error %v", err)
+		glog.Errorf(krbutils.TSE+"exec with pipe failed, error %v", err)
 		return nil, nil, err
 	}
 	if errb.Len() > 0 {
-		glog.Errorf("unable to list keys in keytab file %s, output %s, error %s", keytabFilePath, outb.String(), errb.String())
+		glog.Errorf(krbutils.TSE+"unable to list keys in keytab file %s, output %s, error %s", keytabFilePath, outb.String(), errb.String())
 		return nil, nil, errors.New(outb.String() + " " + errb.String())
 	}
 	re := regexp.MustCompile("  +")
@@ -553,7 +601,7 @@ func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string
 			continue
 		}
 		if keyVersion, err := strconv.Atoi(items[1]); err != nil {
-			glog.Errorf("could not convert key version %s to integer, error: %+v", items[1], err)
+			glog.Errorf(krbutils.TSE+"could not convert key version %s to integer, error: %+v", items[1], err)
 		} else {
 			if existingKeyVersion, ok := keyVersions[items[2]]; ok {
 				if keyVersion > existingKeyVersion {
@@ -582,40 +630,42 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 	var err error
 	var l *lock.Lock
 	var out []byte
-	// create connection object for Kerberos serialization
-	if kl.kubeletConfiguration.TSLockKerberos {
-		mutex, err = lock.NewMutex(
-			kl.kubeletConfiguration.TSLockEtcdServerList,
-			kl.kubeletConfiguration.TSLockEtcdCertFile,
-			kl.kubeletConfiguration.TSLockEtcdKeyFile,
-			kl.kubeletConfiguration.TSLockEtcdCAFile)
-	}
-	if err != nil {
-		glog.Errorf("Can not create Mutex")
-		return err
-	}
+
 	for _, srv := range strings.Split(services, ",") {
 		// check if we already have this key - and continue if we do
 		principal := srv + "/" + clusterName + "@" + realm
 		if _, ok := hostKeyVersions[principal]; ok {
-			glog.V(5).Infof("Keytab for principal %s already present, continuing", principal)
+			glog.V(5).Infof(krbutils.TSL+"Keytab for principal %s already present, continuing", principal)
 			continue
 		}
 		// for each principal we need to create an ACL file in order to be able to request it as another user
 		data := []byte(krbutils.KeytabOwner + " " + realm + " " + srv + " " + clusterName)
 		if err := ioutil.WriteFile(krbutils.Krb5keytabAclDir+srv+"-"+clusterName, data, 0664); err != nil {
-			glog.Errorf("can not create ACL file for service %s in cluster %s, error: %v", srv, clusterName, err)
+			glog.Errorf(krbutils.TSE+"can not create ACL file for service %s in cluster %s, error: %v", srv, clusterName, err)
 			return err
 		} else {
-			glog.V(5).Infof("ACL file for service %s in cluster %s has been created", srv, clusterName)
+			glog.V(5).Infof(krbutils.TSL+"ACL file for service %s in cluster %s has been created", srv, clusterName)
 		}
 		// request the keytab refresh and retry if needed
 		for retry = 0; retry < krbutils.MaxKrb5RetryCount; retry++ {
+
+			if kl.kubeletConfiguration.TSLockKerberos && mutex == nil {
+				mutex, err = lock.NewMutex(
+					kl.kubeletConfiguration.TSLockEtcdServerList,
+					kl.kubeletConfiguration.TSLockEtcdCertFile,
+					kl.kubeletConfiguration.TSLockEtcdKeyFile,
+					kl.kubeletConfiguration.TSLockEtcdCAFile)
+				if err != nil {
+					glog.Errorf(krbutils.TSE + "Can not create Mutex")
+					return err
+				}
+			}
+
 			if kl.kubeletConfiguration.TSLockKerberos {
 				l, err = mutex.Acquire(krbutils.EtcdGlobalFolder, "krb5_keytab", krbutils.EtcdTTL)
 			}
 			if err != nil {
-				glog.Errorf("error obtaining lock while getting key for service %s in cluster %s during %d retry, error: %v",
+				glog.Errorf(krbutils.TSE+"error obtaining lock while getting key for service %s in cluster %s during %d retry, error: %v",
 					srv, clusterName, retry, err)
 				return err
 			}
@@ -626,17 +676,17 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 			if err != nil {
 				lastErr = err
 				lastOut = out
-				glog.Errorf("error creating service key for service %s in cluster %s during %d retry, error: %v, output: %v",
+				glog.V(2).Infof(krbutils.TSL+"TSRETRY error creating service key for service %s in cluster %s during %d retry, error: %v, output: %v",
 					srv, clusterName, retry, err, string(out))
 				time.Sleep(krbutils.Krb5RetrySleepSec)
 			} else {
-				glog.V(5).Infof("keytabfile content has been fetched for principal %s/%s after %d retries, returned output %s with no error",
+				glog.V(5).Infof(krbutils.TSL+"keytabfile content has been fetched for principal %s/%s after %d retries, returned output %s with no error",
 					srv, clusterName, retry, string(out))
 				break
 			}
 		}
 		if retry >= krbutils.MaxKrb5RetryCount {
-			glog.Errorf("error creating service key for service %s in cluster %s after %d retries, giving up, error: %v, output: %v",
+			glog.Errorf(krbutils.TSE+"error creating service key for service %s in cluster %s after %d retries, giving up, error: %v, output: %v",
 				srv, clusterName, retry, lastErr, string(lastOut))
 			return lastErr
 		}
@@ -651,11 +701,11 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	defer clock.ExecTime(time.Now(), "verifyAndFixKeytab", pod.Name)
 
 	if services == "" {
-		glog.V(4).Infof("skipping verifyAndFixKeytab for pod %s since no service keytabs requested in the manifest", pod.Name)
+		glog.V(4).Infof(krbutils.TSL+"skipping verifyAndFixKeytab for pod %s since no service keytabs requested in the manifest", pod.Name)
 		return nil
 	}
 
-	glog.V(4).Infof("starting verifyAndFixKeytab for pod %s", pod.Name)
+	glog.V(4).Infof(krbutils.TSL+"starting verifyAndFixKeytab for pod %s", pod.Name)
 	podKeytabPath := path.Join(podDir, userName)
 
 	//generate cartesian product of services and cluster names that represents all Kerberos principals this Pod needs
@@ -665,16 +715,16 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 			principals[srv+"/"+clusterName+"@"+realm] = true
 		}
 	}
-	glog.V(4).Infof("veryfing keytab for POD %s with podDir %s and principals %+v",
+	glog.V(4).Infof(krbutils.TSL+"veryfing keytab for POD %s with podDir %s and principals %+v",
 		pod.Name, podDir, principals)
 	podKeyVersions, _, err := getKeyVersionsFromKeytab(podKeytabPath)
 	if err != nil {
-		glog.Errorf("Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", podKeytabPath, pod.Name, err)
+		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", podKeytabPath, pod.Name, err)
 		return err
 	}
 	hostKeyVersions, _, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
-		glog.Errorf("Retrieval of keytab key versions from host keytab file %s failed, error: %+v", podKeytabPath, err)
+		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from host keytab file %s failed, error: %+v", podKeytabPath, err)
 		return err
 	}
 	// check if all expected principals are in the Pod's keytab and also if the key versions in the Pod keytab match the newest
@@ -683,18 +733,18 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	oldKey := false
 	for expectedPrincipal, _ := range principals {
 		if podKeyVersion, ok := podKeyVersions[expectedPrincipal]; !ok {
-			glog.Errorf("detected missing principal %s for pod %s", expectedPrincipal, pod.Name)
+			glog.Errorf(krbutils.TSE+"detected missing principal %s for pod %s", expectedPrincipal, pod.Name)
 			missingPrincipals[expectedPrincipal] = true
 		} else {
 			if hostKeyVersion, ok := hostKeyVersions[expectedPrincipal]; !ok {
-				glog.Errorf("detected key in Pod keytab not present in host keytab, principal %s", expectedPrincipal)
+				glog.Errorf(krbutils.TSE+"detected key in Pod keytab not present in host keytab, principal %s", expectedPrincipal)
 
 			} else if hostKeyVersion != podKeyVersion {
-				glog.V(2).Infof("expected principal %s for pod %s has version %d in Pod and version %d in host file, need to fix",
+				glog.Errorf(krbutils.TSE+"expected principal %s for pod %s has version %d in Pod and version %d in host file, need to fix",
 					expectedPrincipal, pod.Name, podKeyVersion, hostKeyVersion)
 				oldKey = true
 			} else {
-				glog.V(5).Infof("expected principal %s for pod %s was found with key version %d", expectedPrincipal, pod.Name, podKeyVersion)
+				glog.V(5).Infof(krbutils.TSL+"expected principal %s for pod %s was found with key version %d", expectedPrincipal, pod.Name, podKeyVersion)
 			}
 		}
 	}
@@ -702,36 +752,39 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	// if any requested principals are missing or key version in Pod is older than in host keytab file,
 	// trigger the fix by invoking kubelet keytab distribution
 	if len(missingPrincipals) > 0 || oldKey {
-		glog.V(2).Infof("attempting to fix missing or expired (older key version) principals for Pod %s", pod.Name)
+		glog.V(2).Infof(krbutils.TSL+"attempting to fix missing or expired (older key version) principals for Pod %s", pod.Name)
 		// repair by calling our callback function in the kubelet server.go thread
 		// this assumes that the reason for failure is lack of callback from the security subsystem
 		data := url.Values{}
 		data.Set("keytabpath", krbutils.HostKeytabFile)
 		if resp, err := http.Post(krbutils.KubeletRESTServiceURL, "text/plain", bytes.NewBufferString(data.Encode())); err != nil {
-			glog.Errorf("keytab fix for Pod %s failed, err: %+v", pod.Name, err)
+			glog.Errorf(krbutils.TSE+"keytab fix for Pod %s failed, err: %+v", pod.Name, err)
 			return err
 		} else {
 			if resp.StatusCode != 200 {
-				glog.Errorf("keytab fix for Pod %s failed, http server returned code %d with message %s",
+				glog.Errorf(krbutils.TSE+"keytab fix for Pod %s failed, http server returned code %d with message %s",
 					pod.Name, resp.StatusCode, resp.Status)
 				return errors.New("keytab fix for Pod " + pod.Name + "failed with error message from httpserver " + resp.Status)
 			} else {
-				glog.V(5).Infof("keytab fix succeeded for Pod %s", pod.Name)
+				glog.V(5).Infof(krbutils.TSL+"keytab fix succeeded for Pod %s", pod.Name)
 			}
 		}
 	} else {
-		glog.V(5).Infof("all required principals for Pod %s were found, no need to fix", pod.Name)
+		glog.V(5).Infof(krbutils.TSL+"all required principals for Pod %s were found, no need to fix", pod.Name)
 	}
 	return nil
 }
 
-func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
+func (kl *Kubelet) makeTktMount(podDir, userName, tkt string, pod *api.Pod) (*kubecontainer.Mount, error) {
 	tktFilePath := path.Join(podDir, krbutils.TicketDirForPod)
 	// skip tkt decode if the file already exists, which means the pod is restarted rather than created
 	if _, err := os.Stat(tktFilePath); os.IsNotExist(err) {
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_TICKET_MOUNT_START", "POD %s", pod.Name)
 		if err := decodeTicket(tktFilePath, tkt, userName, krbutils.TicketUserGroup); err != nil {
+			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_TICKET_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
 			return nil, err
 		}
+		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_TICKET_MOUNT_END", "POD %s", pod.Name)
 	} else if err != nil {
 		// something else went wrong
 		return nil, err
@@ -748,7 +801,8 @@ func decodeTicket(dest, data, user, group string) error {
 	exe := utilexec.New()
 	cmd := exe.Command(krbutils.GsstokenPath, "-r", "-C", dest)
 	env := "KRB5_KTNAME=" + krbutils.HostKeytabFile
-	cmd.SetEnv([]string{env})
+	env1 := "KRB5_CONFIG=" + krbutils.KRB5ConfFile
+	cmd.SetEnv([]string{env, env1})
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -757,19 +811,19 @@ func decodeTicket(dest, data, user, group string) error {
 	stdin.Close()
 	out, err1 := cmd.CombinedOutput()
 	if err1 != nil {
-		glog.Errorf("error decoding ticket, error: %v, output: %v", err1, string(out))
+		glog.Errorf(krbutils.TSE+"error decoding ticket, error: %v, output: %v", err1, string(out))
 		return err1
 	}
 	err1 = os.Chmod(dest, 0600)
 	if err1 != nil {
-		glog.Errorf("error changing tkt file permission to 0600, error: %v", err1)
+		glog.Errorf(krbutils.TSE+"error changing tkt file permission to 0600, error: %v", err1)
 		return err1
 	}
 	owner := user + ":" + group
 	cmd = exe.Command(krbutils.ChownPath, owner, dest)
 	_, err1 = cmd.CombinedOutput()
 	if err1 != nil {
-		glog.Errorf("error changing owner to %v, error: %v", owner, err1)
+		glog.Errorf(krbutils.TSE+"error changing owner to %v, error: %v", owner, err1)
 		return err1
 	}
 	return nil
@@ -941,7 +995,7 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	// create all required TS mounts (for Kerberos ticket, keytabs, certs, and custom resolve.conf)
 	if tsMounts, err := kl.makeTSMounts(pod, kl.getPodDir(pod.UID), podIP, kl.clusterDomain, kl.hostname,
 		kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
-		glog.Errorf("unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
+		glog.Errorf(krbutils.TSE+"unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
 		return nil, err
 	} else {
 		if len(tsMounts) > 0 {
@@ -1357,7 +1411,11 @@ func (kl *Kubelet) HandlePodCleanups() error {
 
 	// manage Kerberos for the active Pods
 	for _, pod := range kl.getActivePods() {
-		kl.podKerberosCh <- &kubecontainer.PodPair{APIPod: pod, RunningPod: nil}
+		needKeytabs, needCerts, _, _ := kl.checkIfPodUsesKerberos(pod)
+		if needCerts || needKeytabs {
+			glog.V(5).Infof(krbutils.TSL+"managing Kerberos objects for Pod %s in HandlePodCleanups()", pod.Name)
+			kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
+		}
 	}
 
 	kl.removeOrphanedPodStatuses(allPods, mirrorPods)
@@ -1442,45 +1500,70 @@ func (kl *Kubelet) podKiller() {
 // podKerberosManager launches a goroutine to update Pod's Kerberos objects based on desired state.
 // The desired state includes both Pod level and service level KDC clusters.
 func (kl *Kubelet) podKerberosManager() {
-	inProgress := sets.NewString()
+	inProgressDelete := sets.NewString()
+	inProgressRefresh := sets.NewString()
+	resultChDelete := make(chan types.UID)
+	resultChRefresh := make(chan types.UID)
 	resultCh := make(chan types.UID)
-	defer close(resultCh)
+	defer close(resultChDelete)
+	defer close(resultChRefresh)
 	for {
 		select {
-		case podPair, ok := <-kl.podKerberosCh:
-			if !ok {
-				return
+		case podUpdateMessage, ok := <-kl.podKerberosCh:
+			if ok {
+				apiPod := podUpdateMessage.APIPod
+				// check what type of request it is and ignore if already on-going
+				if apiPod.DeletionTimestamp != nil {
+					if inProgressDelete.Has(string(apiPod.ObjectMeta.UID)) {
+						break
+					} else {
+						inProgressDelete.Insert(string(apiPod.ObjectMeta.UID))
+						resultCh = resultChDelete
+					}
+				} else {
+					if inProgressRefresh.Has(string(apiPod.ObjectMeta.UID)) {
+						break
+					} else {
+						inProgressRefresh.Insert(string(apiPod.ObjectMeta.UID))
+						resultCh = resultChRefresh
+					}
+				}
+				// fulfill the actual request
+				go func(apiPod *api.Pod, ch chan types.UID) {
+					defer func() {
+						ch <- apiPod.ObjectMeta.UID
+					}()
+					kl.podUpdateKerberos(apiPod)
+				}(apiPod, resultCh)
+			} else {
+				glog.Errorf(krbutils.TSE + "error reading from podKerberosCh")
 			}
 
-			runningPod := podPair.RunningPod
-			apiPod := podPair.APIPod
-			glog.V(2).Infof("Triggering Kerberos management for Pod %s", apiPod.ObjectMeta.Name)
-			if inProgress.Has(string(apiPod.ObjectMeta.UID)) {
-				// The pod's Kerberos is already being managed.
-				break
+		case podID, ok := <-resultChDelete:
+			if ok {
+				inProgressDelete.Delete(string(podID))
+			} else {
+				glog.Errorf(krbutils.TSE + "error reading from resultChDelete")
 			}
-			inProgress.Insert(string(apiPod.ObjectMeta.UID))
-			go func(apiPod *api.Pod, runningPod *kubecontainer.Pod, ch chan types.UID) {
-				defer func() {
-					ch <- apiPod.ObjectMeta.UID
-				}()
-				kl.podUpdateKerberos(apiPod)
-			}(apiPod, runningPod, resultCh)
 
-		case podID := <-resultCh:
-			inProgress.Delete(string(podID))
+		case podID, ok := <-resultChRefresh:
+			if ok {
+				inProgressRefresh.Delete(string(podID))
+			} else {
+				glog.Errorf(krbutils.TSE + "error reading from resultChRefresh")
+			}
 		}
 	}
 }
 
 func (kl *Kubelet) GetAllPodKDCClusterNames(pod *api.Pod) (map[string]bool, error) {
-	glog.V(5).Infof("getting all Pod KDC clusters for Pod %s", pod.Name)
+	defer clock.ExecTime(time.Now(), "GetAllPodKDCClusterNames", pod.Name)
 	if allPodKDCClusters, err := krbutils.GetPodKDCClusterNames(pod, kl.clusterDomain); err != nil {
-		glog.Errorf("error while getting Pod clusters for the POD %s during update, error: %v",
+		glog.Errorf(krbutils.TSE+"error while getting Pod clusters for the POD %s during update, error: %v",
 			pod.Name, err)
 		return nil, err
 	} else if podServiceClusters, err1 := kl.GetPodServiceClusters(pod); err1 != nil {
-		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+		glog.Errorf(krbutils.TSE+"error while getting service clusters for the POD %s during update, error: %v",
 			pod.Name, err1)
 		return nil, err1
 	} else {
@@ -1491,37 +1574,64 @@ func (kl *Kubelet) GetAllPodKDCClusterNames(pod *api.Pod) (map[string]bool, erro
 	}
 }
 
-func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
-	var err error
+func (kl *Kubelet) checkIfPodUsesKerberos(pod *api.Pod) (bool, bool, string, string) {
+	needKeytabs := false
+	needCerts := false
+
+	// check if any Kerberos management is required
 	user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]
 	if !ok {
-		// no Kerberos support for Pods without runasuser so no need to update anything
-		glog.V(5).Infof("Pod %s with no RunAsUser set, skipping", pod.Name)
+		// no ts/runasuser set, nothing to do
+		return false, false, "", ""
+	}
+
+	services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]
+	if ok && services != "" {
+		needKeytabs = true
+	} else {
+		services = ""
+	}
+
+	doCerts, ok := pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation]
+	if ok && doCerts == "true" {
+		needCerts = true
+	}
+	return needKeytabs, needCerts, user, services
+}
+
+func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
+	defer clock.ExecTime(time.Now(), "podUpdateKerberos", pod.Name)
+	var err error
+	var mutex *lock.Mutex
+
+	needKeytabs := false
+	needCerts := false
+	realm := krbutils.KerberosRealm
+
+	needKeytabs, needCerts, user, services := kl.checkIfPodUsesKerberos(pod)
+	if !needCerts && !needKeytabs {
+		// nothing to do for this Pod
 		return
 	}
 
-	glog.V(5).Infof("will update keytabs for Pod %s and user %s", pod.Name, user)
-
+	// get all of the Kerberos clusters the Pod is a member of
 	podAllClusters, err := kl.GetAllPodKDCClusterNames(pod)
 	if err != nil {
-		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+		glog.Errorf(krbutils.TSE+"error while getting service clusters for the POD %s during update, error: %v",
 			pod.Name, err)
 	}
 
 	// check if it is delete or update
-	isDelete := pod.DeletionTimestamp != nil
-
-	if isDelete {
-		glog.V(5).Infof("The update is delete for pod %s", pod.Name)
+	if pod.DeletionTimestamp != nil {
+		glog.V(5).Infof(krbutils.TSL+"deleting Kerberos objects for Pod %s", pod.Name)
 
 		// get clusters for all other active Pods on this node
 		nodeAllClusters, err := kl.getKDCClustersForAllPods(pod)
 		if err != nil {
-			glog.Errorf("error while getting service clusters for the PODs on the node during delete of Pod %s, error: %v",
+			glog.Errorf(krbutils.TSE+"error while getting service clusters for the PODs on the node during delete of Pod %s, error: %v",
 				pod.Name, err)
 		}
 
-		var mutex *lock.Mutex
 		if kl.kubeletConfiguration.TSLockKerberos {
 			mutex, err = lock.NewMutex(
 				kl.kubeletConfiguration.TSLockEtcdServerList,
@@ -1542,33 +1652,16 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 				continue
 			}
 			if err := krbutils.RemoveHostFromClusterInKDC(podClusterName, kl.hostname, mutex); err != nil {
-				glog.V(2).Infof("Failed to remove host %s from KDC clusters %+v for pod %q during Pod update for delete, err: %v",
+				glog.V(2).Infof(krbutils.TSL+"Failed to remove host %s from KDC clusters %+v for pod %q during Pod update for delete, err: %v",
 					kl.hostname, podAllClusters, format.Pod(pod), err)
 			} else {
-				glog.V(5).Infof("Removed host %s from KDC clusters %+v for pod %q during Pod update for delete",
+				glog.V(5).Infof(krbutils.TSL+"Removed host %s from KDC clusters %+v for pod %q during Pod update for delete",
 					kl.hostname, podAllClusters, format.Pod(pod))
 			}
 		}
 	} else {
-		glog.V(5).Infof("The update is NOT delete (a regular update) for pod %s", pod.Name)
-		// check if it has a ticket
-		if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok && !isDelete {
-			kl.refreshTSTkt(pod, user, tkt)
-		}
-		glog.V(5).Infof("about to update service level KDC keytabs and certs for Pod %s", pod.Name)
-		needKeytabs := false
-		needCerts := false
-		realm := krbutils.KerberosRealm
-		services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]
-		if ok && services != "" {
-			needKeytabs = true
-		} else {
-			services = ""
-		}
-		doCerts, ok := pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation]
-		if ok && doCerts == "true" {
-			needCerts = true
-		}
+		// do the Kerberos steady-state management (service level keytab management)
+		glog.V(5).Infof(krbutils.TSL+"will update Kerberos keytabs and certs for Pod %s and user %s", pod.Name, user)
 
 		// only manage KDC cluster if Pod requests either keytabs or certs. In addition to KDC cluster
 		// management, createKeytab function will request actual keytab entries if services != "". In case
@@ -1577,50 +1670,53 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 			keytabFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod)
 			if err := kl.createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
 				kl.hostname, realm, podAllClusters, user); err != nil {
-				glog.Errorf("error creating keytab (in update) for Pod %s clusters %+v services %+v, error: %v",
+				glog.Errorf(krbutils.TSE+"error creating keytab (in refresh) for Pod %s clusters %+v services %+v, error: %v",
 					pod.Name, podAllClusters, services, err)
 			} else {
-				glog.V(5).Infof("Updated keytab file (during Pod update) for clusters %+v and services %+v for POD %q",
+				glog.V(5).Infof(krbutils.TSL+"updated keytab file (during Pod refresh) for clusters %+v and services %+v for POD %q",
 					podAllClusters, services, format.Pod(pod))
 			}
 		}
 		if needCerts {
 			// create certs
-			glog.V(5).Infof("will update certs for Pod %s and user %s", pod.Name, user)
 			certsFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.CertsDirForPod)
 			if err := createCerts(certsFilePath, kl.clusterDomain, pod,
 				kl.hostname, realm, podAllClusters, user); err != nil {
-				glog.Errorf("error creating certs (in update) for Pod %s clusters %+v, error: %v",
+				glog.Errorf(krbutils.TSE+"error creating certs (in update) for Pod %s clusters %+v, error: %v",
 					pod.Name, podAllClusters, err)
 			} else {
-				glog.V(5).Infof("Updated certs file (during Pod update) for clusters %+v for POD %q",
+				glog.V(5).Infof(krbutils.TSL+"updated certs file (during Pod refresh) for clusters %+v for POD %q",
 					podAllClusters, format.Pod(pod))
 			}
 		}
 	}
-	glog.V(5).Infof("update of service level KDC keytabs and certs complete")
 }
 
 // compute the list of all KDC clusters of all Pods on this node except for Pod pod (which is being removed)
 func (kl *Kubelet) getKDCClustersForAllPods(pod *api.Pod) (map[string]bool, error) {
-	glog.V(4).Infof("Getting KDC clusters of all other (than %s) Pods on the node", pod.Name)
+	defer clock.ExecTime(time.Now(), "getKDCClustersForAllPods", pod.Name)
 	allClusters := make(map[string]bool)
 	for _, p := range kl.getActivePods() {
-		glog.V(4).Infof("Getting clusters of Pod %s while verifying node removal", p.Name)
-		// skip the Pod we are removing - no need to check for it
 		if p.ObjectMeta.UID == pod.ObjectMeta.UID {
+			// skip the Pod we are removing - no need to check for it
 			continue
 		}
-		tmpClusters, err := kl.GetAllPodKDCClusterNames(p)
-		if err != nil {
-			glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+		needKeytabs, needCerts, _, _ := kl.checkIfPodUsesKerberos(p)
+		if !needKeytabs && !needCerts {
+			// not a member of any Kerberos clusters, skip
+			continue
+		}
+		if tmpClusters, err := kl.GetAllPodKDCClusterNames(p); err != nil {
+			glog.Errorf(krbutils.TSE+"error while getting service clusters for the POD %s during update, error: %v",
 				p.Name, err)
 			return nil, err
-		}
-		for k, v := range tmpClusters {
-			allClusters[k] = v
+		} else {
+			for k, v := range tmpClusters {
+				allClusters[k] = v
+			}
 		}
 	}
+	glog.V(4).Infof(krbutils.TSL+"all clusters of Pods on the node (except for %s) while verifying node removal are %v", pod.Name, allClusters)
 	return allClusters, nil
 }
 

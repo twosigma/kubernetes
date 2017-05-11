@@ -568,23 +568,23 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 
 	defer clock.ExecTime(time.Now(), "refreshKeytabs", "")
 
-	glog.V(4).Infof("starting Keytab refresh in REST servlet, lock wait time was %d ns", time.Since(startLock).Nanoseconds())
+	glog.V(4).Infof(krbutils.TSL+"starting Keytab refresh in REST servlet, lock wait time was %d ns", time.Since(startLock).Nanoseconds())
 
 	var lastError error
 	response.AddHeader("Content-Type", "text/plain")
 	if body, err := ioutil.ReadAll(request.Request.Body); err != nil {
-		glog.Errorf("failed while reading POST body: %v", err)
+		glog.Errorf(krbutils.TSE+"failed while reading POST body: %v", err)
 		response.WriteErrorString(http.StatusInternalServerError, err.Error())
 		return
 	} else {
 		values, errParse := url.ParseQuery(string(body))
 		if errParse != nil {
-			glog.Errorf("failed while parsing the POST body: %v", errParse)
+			glog.Errorf(krbutils.TSE+"failed while parsing the POST body: %v", errParse)
 			response.WriteErrorString(http.StatusInternalServerError, errParse.Error())
 			return
 		}
 		keytabFile := values["keytabpath"][0]
-		glog.V(4).Infof("Keytab file (to be distributed to containers) is %s", keytabFile)
+		glog.V(4).Infof(krbutils.TSL+"Keytab file (to be distributed to containers) is %s", keytabFile)
 
 		pods := s.host.GetPods()
 		allNeededPrincipals := map[string]bool{}
@@ -593,13 +593,13 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
 					if pod.Spec.SecurityContext.RunAsUser != nil {
-						glog.V(5).Infof("will refresh keytab file for pod %s", pod.Name)
+						glog.V(5).Infof(krbutils.TSL+"will refresh keytab file for pod %s", pod.Name)
 						// extract from global keytab file the parts relevant to this POD
 						if principals, err := s.refreshKeytab(keytabFile, pod, user, services, realm); err != nil {
-							glog.Errorf("keytab refresh for pod %s failed: %v", pod.Name, err)
+							glog.Errorf(krbutils.TSE+"keytab refresh for pod %s failed: %v", pod.Name, err)
 							lastError = err
 						} else {
-							glog.V(5).Infof("keytab file refresh for pod %s completed", pod.Name)
+							glog.V(5).Infof(krbutils.TSL+"keytab file refresh for pod %s completed", pod.Name)
 							// store which principals are still being used (for trimming of the keytab file later)
 							for p := range principals {
 								if !allNeededPrincipals[p] {
@@ -612,20 +612,20 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 			}
 		}
 		if lastError != nil {
-			glog.V(3).Infof("keytab distribution to containers failed, reporting last error %+v", lastError.Error())
+			glog.V(3).Infof(krbutils.TSL+"keytab distribution to containers failed, reporting last error %+v", lastError.Error())
 			response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
 		} else {
 			if nodeHostname, err := os.Hostname(); err != nil {
-				glog.Errorf("could not retrieve hostname of the node, error: %+v", err)
+				glog.Errorf(krbutils.TSE+"could not retrieve hostname of the node, error: %+v", err)
 			} else {
 				// in addition, we need to protect user's keytab from being trimmed
 				allNeededPrincipals[krbutils.KeytabOwner+"/"+nodeHostname+"@"+krbutils.KerberosRealm] = true
-				glog.V(4).Infof("trimming will preserve principals: %+v", allNeededPrincipals)
+				glog.V(4).Infof(krbutils.TSL+"trimming will preserve principals: %+v", allNeededPrincipals)
 				if err := trimKeytabFile(keytabFile, allNeededPrincipals); err != nil {
-					glog.Errorf("error trimming the keytab file %+v", err)
+					glog.Errorf(krbutils.TSE+"error trimming the keytab file %+v", err)
 					response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
 				} else {
-					glog.V(2).Infof("Ending Keytab refresh in REST servlet with success")
+					glog.V(2).Infof(krbutils.TSL + "Ending Keytab refresh in REST servlet with success")
 				}
 			}
 		}
@@ -641,13 +641,13 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 
 	defer clock.ExecTime(time.Now(), "refreshKeytab", keytabFile)
 
-	glog.V(4).Infof("starting keytab refresh for pod %s and userName %s", pod.Name, userName)
+	glog.V(4).Infof(krbutils.TSL+"starting keytab refresh for pod %s and userName %s", pod.Name, userName)
 
 	podDir := s.host.GetPodDir(pod.UID)
 
 	file, err := ioutil.TempFile(os.TempDir(), "k8s-keytab")
 	if err != nil {
-		glog.Errorf("failed to create temp file: %v", err)
+		glog.Errorf(krbutils.TSE+"failed to create temp file: %v", err)
 		return nil, err
 	}
 	tmpFile := file.Name()
@@ -655,7 +655,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 
 	fileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
 	if err != nil {
-		glog.Errorf("failed to create output temp file: %v", err)
+		glog.Errorf(krbutils.TSE+"failed to create output temp file: %v", err)
 		return nil, err
 	}
 	tmpFileOut := fileOut.Name()
@@ -663,7 +663,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 
 	podAllClusters, err := s.host.GetAllPodKDCClusterNames(pod)
 	if err != nil {
-		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+		glog.Errorf(krbutils.TSE+"error while getting service clusters for the POD %s during update, error: %v",
 			pod.Name, err)
 		return nil, err
 	}
@@ -675,23 +675,23 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 			principals[srv+"/"+clusterName+"@"+realm] = true
 		}
 	}
-	glog.V(4).Infof("refreshing keytab for POD %s with clusterNames %+v podDir %s for user %s and services %+v principals %+v",
+	glog.V(4).Infof(krbutils.TSL+"refreshing keytab for POD %s with clusterNames %+v podDir %s for user %s and services %+v principals %+v",
 		pod.Name, podAllClusters, podDir, userName, services, principals)
 	if out, err := krbutils.RunCommand("/bin/cp", "-f", keytabFile, tmpFile); err != nil {
-		glog.Errorf("error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
+		glog.Errorf(krbutils.TSE+"error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
 		return nil, err
 	}
 
 	// extract the required principals
 	if err := extractKeytab(tmpFile, tmpFileOut, principals); err != nil {
-		glog.Errorf("extraction of principals from keytab %s for pod %s failed, error: %v", tmpFile, pod.Name, err)
+		glog.Errorf(krbutils.TSE+"extraction of principals from keytab %s for pod %s failed, error: %v", tmpFile, pod.Name, err)
 		return nil, err
 	}
 	if _, err := os.Stat(tmpFileOut); os.IsNotExist(err) {
 		// this POD does not yet have entry in the host keytab file, do not attempt to create a keytab
 		// this situation happens when the Pod is already in K8s data structures, but Kubelet did not
 		// invoke krb5_keytab for it yet.
-		glog.V(4).Infof("extraction produced the empty keytab, returning")
+		glog.V(4).Infof(krbutils.TSL + "extraction produced the empty keytab, returning")
 		return principals, nil
 	}
 
@@ -704,7 +704,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		"-p",
 		podKeytabDirectory)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		glog.Errorf("unable to create Pod keytab directory: %s %v", out, err)
+		glog.Errorf(krbutils.TSE+"unable to create Pod keytab directory: %s %v", out, err)
 	}
 
 	// copy the extracted part of the keytab to the container's keytab directory
@@ -716,7 +716,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		tmpFileOut,
 		podKeytabFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		glog.Errorf("unable to copy the extracted keytab for user %s from tmpFile %s to destination %s: %s %v",
+		glog.Errorf(krbutils.TSE+"unable to copy the extracted keytab for user %s from tmpFile %s to destination %s: %s %v",
 			userName, tmpFileOut, podKeytabFile, out, err)
 		return nil, err
 	}
@@ -724,23 +724,23 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 	// modify the file permissions so the keytab file is readable only to the runAsUser declared in the manifest
 	runAsUser := pod.Spec.SecurityContext.RunAsUser
 	if runAsUser == nil {
-		glog.V(4).Infof("runAsUser not set, skipping keytab ownership change")
+		glog.V(4).Infof(krbutils.TSL + "runAsUser not set, skipping keytab ownership change")
 		return principals, nil
 	}
 	owner := strconv.Itoa(int(*runAsUser)) + ":" + krbutils.TicketUserGroup
-	glog.V(4).Infof("keytab file %s ownership will be changed to runAsUser %s", podKeytabFile, owner)
+	glog.V(4).Infof(krbutils.TSL+"keytab file %s ownership will be changed to runAsUser %s", podKeytabFile, owner)
 	err = os.Chmod(podKeytabFile, 0600)
 	if err != nil {
-		glog.Errorf("error changing keytab file %s permission to 0600, error: %v", podKeytabFile, err)
+		glog.Errorf(krbutils.TSE+"error changing keytab file %s permission to 0600, error: %v", podKeytabFile, err)
 		return nil, err
 	}
 	cmd = exe.Command("/bin/chown", owner, podKeytabFile)
 	_, err = cmd.CombinedOutput()
 	if err != nil {
-		glog.Errorf("error changing owner of the keytab file %s to %v, error: %v", podKeytabFile, owner, err)
+		glog.Errorf(krbutils.TSE+"error changing owner of the keytab file %s to %v, error: %v", podKeytabFile, owner, err)
 		return nil, err
 	}
-	glog.V(4).Infof("keytab file %s ownership has been changed to runAsUser %s, copy and ownership exectime %s",
+	glog.V(4).Infof(krbutils.TSL+"keytab file %s ownership has been changed to runAsUser %s, copy and ownership exectime %s",
 		podKeytabFile, owner, time.Since(startCopyAndOwnership))
 	return principals, nil
 }
@@ -750,17 +750,17 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 func trimKeytabFile(keytabFile string, allNeededPrincipals map[string]bool) error {
 	defer clock.ExecTime(time.Now(), "trimKeytabFile", keytabFile)
 
-	glog.V(4).Infof("will trim keytab file %s keeping principals %+v", keytabFile, allNeededPrincipals)
+	glog.V(4).Infof(krbutils.TSL+"will trim keytab file %s keeping principals %+v", keytabFile, allNeededPrincipals)
 	tmpFileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
 	if err != nil {
-		glog.Errorf("failed to create output temp file for trimming: %+v", err)
+		glog.Errorf(krbutils.TSE+"failed to create output temp file for trimming: %+v", err)
 		return err
 	}
 	tmpFileOutName := tmpFileOut.Name()
 	defer os.Remove(tmpFileOutName)
 
 	if err := extractKeytab(keytabFile, tmpFileOutName, allNeededPrincipals); err != nil {
-		glog.Errorf("failed to extract keytab for trimming: %+v", err)
+		glog.Errorf(krbutils.TSE+"failed to extract keytab for trimming: %+v", err)
 		return err
 	}
 	exe := utilexec.New()
@@ -770,11 +770,11 @@ func trimKeytabFile(keytabFile string, allNeededPrincipals map[string]bool) erro
 		tmpFileOutName,
 		keytabFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		glog.Errorf("unable to copy the trimmed keytab file %s to destination %s, output %s, err %+v",
+		glog.Errorf(krbutils.TSE+"unable to copy the trimmed keytab file %s to destination %s, output %s, err %+v",
 			tmpFileOut, keytabFile, out, err)
 		return err
 	} else {
-		glog.V(4).Infof("keytab has been trimmed at %s, output %s", keytabFile, out)
+		glog.V(4).Infof(krbutils.TSL+"keytab has been trimmed at %s, output %s", keytabFile, out)
 		return nil
 	}
 }
@@ -785,15 +785,15 @@ func extractKeytab(keytabFilename, keytabFilenameOut string, principals map[stri
 	// list all entries in the keytab file
 	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilename + "\nlist\nq\n"}, []string{})
 	if err != nil {
-		glog.Errorf("exec with pipe failed, error %v", err)
+		glog.Errorf(krbutils.TSE+"exec with pipe failed, error %v", err)
 		return err
 	}
 	if errb.Len() > 0 {
-		glog.Errorf("unable to list keys in keytab file %s, output %v, error %v", keytabFilename, outb, errb)
+		glog.Errorf(krbutils.TSE+"unable to list keys in keytab file %s, output %v, error %v", keytabFilename, outb, errb)
 		return errors.New(outb.String() + " " + errb.String())
 	}
 
-	glog.V(4).Infof("preparing keytab extraction string")
+	glog.V(4).Infof(krbutils.TSL + "preparing keytab extraction string")
 	re := regexp.MustCompile("  +")
 	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
 	toRemove := "rkt " + keytabFilename + "\n"
@@ -813,27 +813,27 @@ func extractKeytab(keytabFilename, keytabFilenameOut string, principals map[stri
 		}
 	}
 	toRemove = toRemove + "wkt " + keytabFilenameOut + "\nq\n"
-	glog.V(4).Infof("keytab extraction string to be executed has been prepared, %s", toRemove)
+	glog.V(4).Infof(krbutils.TSL + "keytab extraction string to be executed has been prepared")
 
 	// need to remove actual tmpfile since ktutil can not write to an existing empty file
 	// (if attempted, an incorrect file format error is raised)
 	if err := os.Remove(keytabFilenameOut); err != nil {
-		glog.Errorf("unable to remove  ORtempfile %s, error %v", keytabFilenameOut, err)
+		glog.Errorf(krbutils.TSE+"unable to remove  ORtempfile %s, error %v", keytabFilenameOut, err)
 		return err
 	}
 
 	// extract the keys
 	outb, errb, err = krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{toRemove}, []string{})
 	if err != nil {
-		glog.Errorf("exec with pipe failed while extracting the keys, error %v", err)
+		glog.Errorf(krbutils.TSE+"exec with pipe failed while extracting the keys, error %v", err)
 		return err
 	}
 	if errb.Len() > 0 {
-		glog.Errorf("unable to remove keys from keytab file %s and write to keytab file %s, output %v, error %v",
+		glog.Errorf(krbutils.TSE+"unable to remove keys from keytab file %s and write to keytab file %s, output %v, error %v",
 			keytabFilename, keytabFilenameOut, outb.String(), errb.String())
 		return errors.New(outb.String() + " " + errb.String())
 	} else {
-		glog.V(4).Infof("ktutil returned with, %s", outb.String())
+		glog.V(4).Infof(krbutils.TSL+"ktutil returned with, %s", outb.String())
 	}
 	return nil
 }

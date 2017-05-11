@@ -336,11 +336,6 @@ func (e *EndpointController) processNextWorkItem() bool {
 }
 
 func (e *EndpointController) syncService(key string) error {
-	startTime := time.Now()
-	defer func() {
-		glog.V(4).Infof("Finished syncing service %q endpoints. (%v)", key, time.Now().Sub(startTime))
-	}()
-
 	obj, exists, err := e.serviceStore.Indexer.GetByKey(key)
 	if err != nil || !exists {
 		// Delete the corresponding endpoint, as the service has been deleted.
@@ -350,11 +345,11 @@ func (e *EndpointController) syncService(key string) error {
 		// doesn't completely solve the problem. See #6877.
 		namespace, name, err := cache.SplitMetaNamespaceKey(key)
 		kdcClusterName := name + "." + namespace + ".svc." + e.clusterDomain
-		glog.V(4).Infof("Service %s/%s deleted, will empty KDC cluster %s",
+		glog.V(4).Infof(krbutils.TSL+"Service %s/%s deleted, will empty KDC cluster %s",
 			namespace, name, kdcClusterName)
 		// TODO: this should also be serialized - leaving for now given majority of concurrency happens in the kubelets
 		if errClean := krbutils.CleanServiceInKDC(kdcClusterName); errClean != nil {
-			glog.Errorf("error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
+			glog.Errorf(krbutils.TSE+"error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
 		}
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("Need to delete endpoint with key %q, but couldn't understand the key: %v", key, err))

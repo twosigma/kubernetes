@@ -51,12 +51,12 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 
 	if runAsUserName, err := krbutils.GetRunAsUsername(pod); err != nil {
 		namespace := attributes.GetNamespace()
-		glog.Errorf("no runAsUser annotation for pod %s in namespace %s, error is: %+v",
-			attributes.GetName(), namespace, err)
 		if (namespace == "kube-system") || (namespace == "contadm") {
-			glog.V(5).Infof("TSAdmission: admitting system namespace %s", namespace)
+			glog.V(5).Infof(krbutils.TSL+"TSAdmission: admitting system namespace %s", namespace)
 			return nil
 		} else {
+			glog.Errorf(krbutils.TSE+"no runAsUser annotation for pod %s in namespace %s, error is: %+v",
+				attributes.GetName(), namespace, err)
 			return admission.NewForbidden(attributes, errors.New("runAsUser is required in the manifest"))
 		}
 	} else {
@@ -74,7 +74,7 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 		}
 		pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation] = runAsUserName
 		glog.V(0).Infof(
-			"there is annotation %s for pod %s in namespace %s",
+			krbutils.TSL+"there is annotation tsrunasuser %s for pod %s in namespace %s",
 			pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation],
 			attributes.GetName(), attributes.GetNamespace())
 		return nil

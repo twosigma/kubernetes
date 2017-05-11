@@ -6,6 +6,7 @@ import (
 	"github.com/coreos/etcd/pkg/tlsutil"
 	"github.com/golang/glog"
 	"golang.org/x/net/context"
+	"k8s.io/kubernetes/pkg/util/clock"
 	"net"
 	"net/http"
 	"sort"
@@ -30,8 +31,11 @@ type Lock struct {
 
 // create new Mutex connection
 func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, error) {
+	defer clock.ExecTime(time.Now(), "NewMutex", "None")
 	var transport client.CancelableTransport
 	if certFile != "" && keyFile != "" && CAFile != "" {
+		glog.V(5).Infof("TSLOG TSLOCK NewMutex setting SSL certFile %s keyFile %s CAFile %s with endpoints %v",
+			certFile, keyFile, CAFile, endpoints)
 		tlsCert, err := tlsutil.NewCert(certFile, keyFile, nil)
 		if err != nil {
 			return nil, err
@@ -44,6 +48,7 @@ func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, err
 		if err != nil {
 			return nil, err
 		}
+		tlsCfg.InsecureSkipVerify = true
 		transport = &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			Dial: (&net.Dialer{
@@ -54,6 +59,7 @@ func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, err
 			TLSClientConfig:     tlsCfg,
 		}
 	} else {
+		glog.V(5).Infof("TSLOG TSLOCK NewMutex setting without SSL with endpoints %v", endpoints)
 		transport = client.DefaultTransport
 	}
 	cfg := client.Config{
@@ -70,7 +76,8 @@ func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, err
 
 // acquire lock (within Etcd folder)
 func (m *Mutex) Acquire(key string, descr string, ttl uint64) (*Lock, error) {
-	glog.V(5).Infof("TSLOCK acquire for key %s", key)
+	defer clock.ExecTime(time.Now(), "Acquire", key+"/"+descr)
+	glog.V(5).Infof("TSLOG TSLOCK acquire for key %s", key)
 	key = EtcdPrefix + key
 	m.cl.Sync(context.Background())
 	if lock, err := m.kapi.CreateInOrder(context.Background(), key, descr, &client.CreateInOrderOptions{}); err != nil {
@@ -101,6 +108,7 @@ func (m *Mutex) Acquire(key string, descr string, ttl uint64) (*Lock, error) {
 			&client.SetOptions{TTL: time.Duration(ttl) * time.Second}); err != nil {
 			return nil, err
 		} else {
+			glog.V(5).Infof("TSLOG TSLOCK got lock for key %s with %s", key, lock.Node.Key)
 			return &Lock{m.kapi, lock.Node.Key, lock.Node.CreatedIndex}, nil
 		}
 	}
@@ -134,7 +142,8 @@ func (m *Mutex) wait(key string) error {
 
 // release the lock
 func (l *Lock) Release() error {
-	glog.V(5).Infof("TSLOCK release for key %s", l.key)
+	defer clock.ExecTime(time.Now(), "Release", l.key)
+	glog.V(5).Infof("TSLOG TSLOCK release for key %s", l.key)
 	if _, err := l.kapi.Delete(context.Background(), l.key, &client.DeleteOptions{}); err != nil {
 		return err
 	} else {

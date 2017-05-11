@@ -36,6 +36,7 @@ import (
 	"k8s.io/kubernetes/pkg/dns/treecache"
 	"k8s.io/kubernetes/pkg/dns/util"
 	"k8s.io/kubernetes/pkg/runtime"
+	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/validation"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/watch"
@@ -362,7 +363,7 @@ func (kd *KubeDNS) handleEndpointAdd(obj interface{}) {
 
 func (kd *KubeDNS) newPod(obj interface{}) {
 	if p, ok := obj.(*kapi.Pod); ok && len(p.Status.PodIP) > 0 {
-		glog.V(4).Infof("Add pod %s with IP %s", p.Name, p.Status.PodIP)
+		glog.V(4).Infof(krbutils.TSL+"Add pod %s with IP %s", p.Name, p.Status.PodIP)
 		recordValue, _ := util.GetSkyMsg(p.Status.PodIP, 0)
 		cachePath := append(kd.domainPath, p.Namespace)
 		domainLabels := append(kd.domainPath, p.Namespace, p.Name)
@@ -371,24 +372,28 @@ func (kd *KubeDNS) newPod(obj interface{}) {
 		defer kd.cacheLock.Unlock()
 
 		kd.cache.SetEntry(p.Name, recordValue, fqdn, cachePath...)
-		// Additionally, if runAsUser was set, create another DNS record for the hostname prefixed with the username
-		if runAsUsername, ok := p.ObjectMeta.Annotations["ts/runasusername"]; ok {
-			glog.V(0).Infof("runAsUser %s provided for pod %s, adding additional DNS entry", runAsUsername, p.Name)
-			cachePath = append(cachePath, p.Name)
-			domainLabels := append(kd.domainPath, p.Namespace, p.Name, runAsUsername)
-			fqdn := dns.Fqdn(strings.Join(util.ReverseArray(domainLabels), "."))
-			kd.cache.SetEntry(runAsUsername, recordValue, fqdn, cachePath...)
+		// Additionally, if runAsUser was set and ts/userprefixedhostname, create another DNS record
+		// for the hostname prefixed with the username
+		if runAsUsername, ok := p.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+			if tsuserprefixedhostname, ok := p.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok && tsuserprefixedhostname == "true" {
+				glog.V(0).Infof(krbutils.TSL+"runAsUser %s provided for pod %s, adding additional DNS entry", runAsUsername, p.Name)
+				cachePath = append(cachePath, p.Name)
+				domainLabels := append(kd.domainPath, p.Namespace, p.Name, runAsUsername)
+				fqdn := dns.Fqdn(strings.Join(util.ReverseArray(domainLabels), "."))
+				kd.cache.SetEntry(runAsUsername, recordValue, fqdn, cachePath...)
+			} else {
+				glog.V(0).Infof(krbutils.TSL+"ts/userprefixedhostname not provided for pod %s", p.Name)
+			}
 		} else {
-			glog.V(0).Infof("runAsUser not provided for pod %s", p.Name)
+			glog.V(0).Infof(krbutils.TSL+"runAsUser not provided for pod %s", p.Name)
 		}
-
 	}
 }
 
 func (kd *KubeDNS) updatePod(oldobj, newobj interface{}) {
 	if _, ok := oldobj.(*kapi.Pod); ok {
 		if newPod, ok := newobj.(*kapi.Pod); ok && len(newPod.Status.PodIP) > 0 {
-			glog.V(4).Infof("Update pod %s with IP %s", newPod.Name, newPod.Status.PodIP)
+			glog.V(4).Infof(krbutils.TSL+"Update pod %s with IP %s", newPod.Name, newPod.Status.PodIP)
 			kd.removePod(oldobj)
 			kd.newPod(newobj)
 		}
@@ -398,7 +403,7 @@ func (kd *KubeDNS) updatePod(oldobj, newobj interface{}) {
 func (kd *KubeDNS) removePod(obj interface{}) {
 	if p, ok := obj.(*kapi.Pod); ok {
 		subCachePath := append(kd.domainPath, p.Namespace, p.Name)
-		glog.V(4).Infof("Remove pod %s at path %s", p.Name, subCachePath)
+		glog.V(4).Infof(krbutils.TSL+"Remove pod %s at path %s", p.Name, subCachePath)
 		kd.cacheLock.Lock()
 		defer kd.cacheLock.Unlock()
 		kd.cache.DeletePath(subCachePath...)

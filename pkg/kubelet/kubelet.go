@@ -805,7 +805,7 @@ func NewMainKubelet(kubeCfg *componentconfig.KubeletConfiguration, kubeDeps *Kub
 	klet.softAdmitHandlers.AddPodAdmitHandler(lifecycle.NewAppArmorAdmitHandler(klet.appArmorValidator))
 
 	// create Kerberos management channel
-	klet.podKerberosCh = make(chan *kubecontainer.PodPair, podKerberosChannelCapacity)
+	klet.podKerberosCh = make(chan *PodUpdateKerberosMessage, podKerberosChannelCapacity)
 
 	// Finally, put the most recent version of the config on the Kubelet, so
 	// people can see how it was configured.
@@ -819,6 +819,11 @@ type serviceLister interface {
 
 type nodeLister interface {
 	List() (machines api.NodeList, err error)
+}
+
+type PodUpdateKerberosMessage struct {
+	// APIPod is the api.Pod
+	APIPod *api.Pod
 }
 
 // Kubelet is the main kubelet implementation.
@@ -1112,7 +1117,7 @@ type Kubelet struct {
 	experimentalHostUserNamespaceDefaulting bool
 
 	// channel for Kerberos management
-	podKerberosCh chan *kubecontainer.PodPair
+	podKerberosCh chan *PodUpdateKerberosMessage
 }
 
 // setupDataDirs creates:
@@ -1291,16 +1296,15 @@ func (kl *Kubelet) GetClusterDomain() string {
 // to preserve the inode (so the container does not need to be restarted).
 func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 	tktFilePath := path.Join(kl.getPodDir(pod.UID), "tkt")
-	glog.V(2).Infof("starting refresh of ticket file at %s for user %s", tktFilePath, user)
 	if _, err := os.Stat(tktFilePath); err == nil {
 		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
 		if err != nil {
-			glog.Errorf("failed to create temp file: %v", err)
+			glog.Errorf(krbutils.TSE+"failed to create temp file: %v", err)
 		} else {
 			tmpFile := file.Name()
 			defer os.Remove(tmpFile)
 			if err := decodeTicket(tmpFile, tkt, user, krbutils.TicketUserGroup); err != nil {
-				glog.Errorf("unable to decode and refresh the ticket: %v", err)
+				glog.Errorf(krbutils.TSE+"unable to decode and refresh the ticket: %v", err)
 			} else {
 				exe := utilexec.New()
 				cmd := exe.Command(
@@ -1309,16 +1313,16 @@ func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 					tmpFile,
 					tktFilePath)
 				if out, err := cmd.CombinedOutput(); err != nil {
-					glog.Errorf("unable to copy the refreshed ticket: %s %v", out, err)
+					glog.Errorf(krbutils.TSE+"unable to copy the refreshed ticket: %s %v", out, err)
 				} else {
-					glog.V(2).Infof("ticket has been refreshed at %s %s", tktFilePath, out)
+					glog.V(2).Infof(krbutils.TSL+"ticket has been refreshed at %s %s", tktFilePath, out)
 				}
 			}
 		}
 	} else if os.IsNotExist(err) {
-		glog.V(2).Infof("ticket file does not exist at %s", tktFilePath)
+		glog.Errorf(krbutils.TSE+"ticket file does not exist at %s", tktFilePath)
 	} else {
-		glog.Errorf("unable to check if the TS ticket file exists: %v", err)
+		glog.Errorf(krbutils.TSE+"unable to check if the TS ticket file exists: %v", err)
 	}
 }
 
@@ -1327,26 +1331,18 @@ func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 func (kl *Kubelet) GetPodServiceClusters(pod *api.Pod) (map[string]bool, error) {
 	podLabels := pod.Labels
 	if services, err := kl.serviceLister.List(labels.Everything()); err != nil {
-		glog.Errorf("error listing Pod's services for keytab creation for Pod %s: %v", pod.Name, err)
+		glog.Errorf(krbutils.TSE+"error listing Pod's services for keytab creation for Pod %s: %v", pod.Name, err)
 		return nil, err
 	} else {
 		// services is of type api.ServiceList
 		// filter for services selecting this POD
-		glog.V(5).Infof("listing of Pod labels for Pod %s:", pod.Name)
-		for labelKey, labelVal := range podLabels {
-			glog.V(5).Infof("Pod label: %s/%s", labelKey, labelVal)
-		}
-
 		// TODO: Check if there is a simpler way of finding services selecting a Pod.
-		glog.V(5).Infof("checking for services selecting the Pod %s", pod.Name)
 		serviceClusters := make(map[string]bool)
 		for i := range services {
 			service := services[i]
 			serviceCluster := service.Name + "." + service.Namespace + ".svc." + kl.clusterDomain
-			glog.V(5).Infof("checking service selectors for service %s", serviceCluster)
 			isMember := false
 			for selKey, selVal := range service.Spec.Selector {
-				glog.V(5).Infof("checking service selector: %s/%s", selKey, selVal)
 				if labelVal := podLabels[selKey]; labelVal == selVal {
 					isMember = true
 					break
@@ -1357,9 +1353,9 @@ func (kl *Kubelet) GetPodServiceClusters(pod *api.Pod) (map[string]bool, error) 
 			// serviceEndpoints, err := xx?.GetServiceEndpoints(service)
 			if isMember {
 				serviceClusters[serviceCluster] = true
-				glog.V(5).Infof("POD is member of cluster of service %s", serviceCluster)
 			}
 		}
+		glog.V(5).Infof(krbutils.TSL+"services selecting Pod %s are %v", pod.Name, serviceClusters)
 		return serviceClusters, nil
 	}
 }
@@ -1419,7 +1415,6 @@ func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
 			hostDNS = []string{"127.0.0.1"}
 			hostSearch = []string{"."}
 		}
-		glog.V(5).Infof("hostDNS=%v, hostSearch=%v", hostDNS, hostSearch)
 		return hostDNS, hostSearch, nil
 	}
 
@@ -2086,8 +2081,17 @@ func (kl *Kubelet) HandlePodAdditions(pods []*api.Pod) {
 func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
-		// trigger update of Kerberos objects
-		kl.podKerberosCh <- &kubecontainer.PodPair{APIPod: pod, RunningPod: nil}
+		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+			if pod.DeletionTimestamp != nil {
+				// clean-up Kerberos state
+				kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
+			} else {
+				// check if the updated Pod has an encoded ticket (ts/ticket annotation) and, if it does, trigger refresh
+				if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {
+					kl.refreshTSTkt(pod, user, tkt)
+				}
+			}
+		}
 		kl.podManager.UpdatePod(pod)
 		if kubepod.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)

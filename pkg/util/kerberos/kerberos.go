@@ -48,9 +48,6 @@ const (
 	// Kerberos realm
 	KerberosRealm = "N.TWOSIGMA.COM"
 
-	// additional search domain to be added to container's /etc/resolv.conf
-	AdditionalSearchDomain = "twosigma.com app.twosigma.com"
-
 	// Etcd subfolder for global locks
 	EtcdGlobalFolder = "global/"
 
@@ -114,8 +111,15 @@ const (
 	// location of gss-token binary
 	GsstokenPath = "/usr/local/bin/gss-token"
 
+	// location of krb5 config file for extended skew option
+	KRB5ConfFile = "/etc/krb5-extended-skew.conf"
+
 	// location of chown binary
 	ChownPath = "/bin/chown"
+
+	// prefixes for logging
+	TSL = "TSLOG "
+	TSE = "TSERR "
 
 	// TS extended manifest annotations
 	TSPrestashTkt                = "ts/prestashtkt"
@@ -194,7 +198,7 @@ func RegisterClusterInKDC(clusterName string, mutex *lock.Mutex) error {
 		if mutex != nil {
 			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_createlogicalhost", EtcdTTL)
 			if err != nil {
-				glog.Errorf("could not obtain lock, error: %v,", err)
+				glog.Errorf(TSE+"could not obtain lock, error: %v,", err)
 				return err
 			}
 		}
@@ -206,26 +210,26 @@ func RegisterClusterInKDC(clusterName string, mutex *lock.Mutex) error {
 			if !strings.Contains(string(out), "already exists") {
 				lastErr = err
 				lastOut = out
-				glog.Errorf("error registering cluster %s in KDC, will retry %d, error: %v, output: %v",
+				glog.V(2).Infof(TSL+"TSRETRY error registering cluster %s in KDC, will retry %d, error: %v, output: %v",
 					clusterName, retry, err, string(out))
 				time.Sleep(Krb5RetrySleepSec)
 			} else {
-				glog.V(4).Infof("cluster %s is already in the KDC, not added", clusterName)
+				glog.V(4).Infof(TSL+"cluster %s is already in the KDC, not added", clusterName)
 				return nil
 			}
 		} else {
-			glog.V(5).Infof("cluster %s was added to the KDC with output %s", clusterName, string(out))
+			glog.V(5).Infof(TSL+"cluster %s was added to the KDC with output %s", clusterName, string(out))
 			return nil
 		}
 	}
-	glog.Errorf("error registering cluster %s in KDC after %d retries, giving up, last error: %v, output: %v",
+	glog.Errorf(TSE+"error registering cluster %s in KDC after %d retries, giving up, last error: %v, output: %v",
 		clusterName, retry, lastErr, string(lastOut))
 	return lastErr
 }
 
 func RunCommand(cmdToExec string, params ...string) ([]byte, error) {
 	defer clock.ExecTime(time.Now(), "runCommand", cmdToExec)
-	glog.V(4).Infof("will exec %s %+v", cmdToExec, params)
+	glog.V(5).Infof(TSL+"will exec %s %+v", cmdToExec, params)
 	exe := utilexec.New()
 	cmd := exe.Command(cmdToExec, params...)
 	return cmd.CombinedOutput()
@@ -237,7 +241,7 @@ func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, b
 
 	defer clock.ExecTime(time.Now(), "execWithPipe", cmd1Str+" "+cmd2Str)
 
-	glog.V(4).Infof("entering execWithPipe() cmd1 %s cmd2 %s", cmd1Str, cmd2Str)
+	glog.V(4).Infof(TSL+"entering execWithPipe() cmd1 %s cmd2 %s", cmd1Str, cmd2Str)
 
 	r, w := io.Pipe()
 
@@ -250,23 +254,23 @@ func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, b
 	cmd2.Stderr = &e
 
 	if err := cmd1.Start(); err != nil {
-		glog.Errorf("unable to start command %s, error %+v", cmd1Str, err)
+		glog.Errorf(TSE+"unable to start command %s, error %+v", cmd1Str, err)
 		return o, e, err
 	}
 	if err := cmd2.Start(); err != nil {
-		glog.Errorf("unable to start command %s, error %+v", cmd2Str, err)
+		glog.Errorf(TSE+"unable to start command %s, error %+v", cmd2Str, err)
 		return o, e, err
 	}
 
 	go func() {
 		defer w.Close()
 		if err := cmd1.Wait(); err != nil {
-			glog.Errorf("error while waiting for the first command %s, error %+v", cmd1Str, err)
+			glog.Errorf(TSE+"error while waiting for the first command %s, error %+v", cmd1Str, err)
 		}
 	}()
 
 	if err := cmd2.Wait(); err != nil {
-		glog.Errorf("error while waiting for the second command %s, error %+v", cmd2Str, err)
+		glog.Errorf(TSE+"error while waiting for the second command %s, error %+v", cmd2Str, err)
 		return o, e, err
 	}
 	return o, e, nil
@@ -280,6 +284,18 @@ func RemoveHostFromClusterInKDC(clusterName, hostName string, mutex *lock.Mutex)
 	var err error
 	var out []byte
 	var l *lock.Lock
+
+	// check if the node is a member of the KDC cluster
+	// it may not be if the Pod is being deleted just after creation (and the Kerberos objects were not created yet)
+	memberNodes, err := getKDCMemberNodes(clusterName)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(memberNodes, hostName) {
+		glog.V(4).Infof(TSL+"cluster %s has no member %s, no need to remove", clusterName, hostName)
+		return nil
+	}
+	// remove the node hostName from the KDC cluster
 	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
 		if mutex != nil {
 			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_removehostmap", EtcdTTL)
@@ -291,22 +307,20 @@ func RemoveHostFromClusterInKDC(clusterName, hostName string, mutex *lock.Mutex)
 		if err != nil {
 			lastErr = err
 			lastOut = out
-			glog.Errorf("error removing host %s from cluster %s in KDC, will retry %d, error: %v, output: %v",
+			glog.V(2).Infof(TSL+"TSRETRY error removing host %s from cluster %s in KDC, will retry %d, error: %v, output: %v",
 				hostName, clusterName, retry, err, string(out))
 			time.Sleep(Krb5RetrySleepSec)
 		} else {
-			glog.V(5).Infof("removeHostFromClusterInKDC() returned output %s with no error", string(out))
+			glog.V(5).Infof(TSL+"removeHostFromClusterInKDC() returned output %s with no error", string(out))
 			return nil
 		}
 	}
-	glog.Errorf("error removing host %s from cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
+	glog.Errorf(TSE+"error removing host %s from cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
 		hostName, clusterName, retry, lastErr, string(lastOut))
 	return lastErr
 }
 
-// remove all member nodes from the service cluster in KDC
-// This is invoked when service is deleted
-func CleanServiceInKDC(clusterName string) error {
+func getKDCMemberNodes(clusterName string) (string, error) {
 	// krb5_admin query_host <cluster_name> | awk '($1=="member:"){print $2;}'
 	outb, errb, err := ExecWithPipe(
 		Krb5adminPath,
@@ -314,30 +328,48 @@ func CleanServiceInKDC(clusterName string) error {
 		[]string{"query_host", clusterName},
 		[]string{"-v", "p=member:", "($1==p){print $2;}"})
 	if err != nil {
-		glog.Errorf("exec with pipe failed while cleaning service cluster %s in KDC, error %v, errb %s, outb %s",
+		glog.Errorf(TSE+"exec with pipe failed while cleaning service cluster %s in KDC, error %v, errb %s, outb %s",
 			clusterName, err, errb.String(), outb.String())
-		return err
+		return "", err
 	}
 	if errb.Len() > 0 {
-		glog.Errorf("unable to list members of cluster %s in KDC, out %+v, error %+v", clusterName, outb.String(), errb.String())
-		return goerrors.New(outb.String() + " " + errb.String())
-	} else {
-		glog.V(4).Infof("retrieved members of cluster %s are %+v", clusterName, outb.String())
+		glog.Errorf(TSE+"unable to list members of cluster %s in KDC, out %+v, error %+v", clusterName, outb.String(), errb.String())
+		return "", goerrors.New(outb.String() + " " + errb.String())
 	}
 	memberNodes := strings.Trim(outb.String(), "\n")
+	return memberNodes, nil
+}
+
+// remove all member nodes from the service cluster in KDC
+// This is invoked when service is deleted
+func CleanServiceInKDC(clusterName string) error {
+	defer clock.ExecTime(time.Now(), "CleanServiceInKDC", clusterName)
+
 	var lastErr error
 	lastErr = nil
+
+	memberNodes, err := getKDCMemberNodes(clusterName)
+	if err != nil {
+		return err
+	}
+	if memberNodes != "" {
+		glog.V(4).Infof(TSL+"retrieved members of cluster %s are %+v", clusterName, memberNodes)
+	} else {
+		// nothing to clean-up
+		return nil
+	}
+
 	for _, nodeName := range strings.Split(memberNodes, ",") {
-		glog.V(4).Infof("removing node %s from cluster %s in KDC", nodeName, clusterName)
+		glog.V(4).Infof(TSL+"removing node %s from cluster %s in KDC", nodeName, clusterName)
 		if err := RemoveHostFromClusterInKDC(clusterName, nodeName, nil); err != nil {
 			lastErr = err
-			glog.Errorf("error while removing node %s from KDC cluster %s, error %v", nodeName, clusterName, err)
+			glog.Errorf(TSE+"error while removing node %s from KDC cluster %s, error %v", nodeName, clusterName, err)
 		} else {
-			glog.V(4).Infof("node %s removed from cluster %s in KDC", nodeName, clusterName)
+			glog.V(4).Infof(TSL+"node %s removed from cluster %s in KDC", nodeName, clusterName)
 		}
 	}
 	if lastErr != nil {
-		glog.Errorf("error while removing one of the nodes from KDC cluster %s, error %v", clusterName, lastErr)
+		glog.Errorf(TSE+"error while removing one of the nodes from KDC cluster %s, error %v", clusterName, lastErr)
 		return lastErr
 	} else {
 		return nil
@@ -365,19 +397,26 @@ func AddHostToClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) erro
 			if !strings.Contains(string(out), "is already in cluster") {
 				lastErr = err
 				lastOut = out
-				glog.Errorf("error adding host %s to cluster %s in KDC, will retry %d, error: %v, output: %v",
+				glog.V(2).Infof(TSL+"TSRETRY error adding host %s to cluster %s in KDC, will retry %d, error: %v, output: %v",
 					hostName, clusterName, retry, err, string(out))
 				time.Sleep(Krb5RetrySleepSec)
 			} else {
-				glog.V(2).Infof("host %s is already in the cluster %s, not added", hostName, clusterName)
+				glog.V(2).Infof(TSL+"host %s is already in the cluster %s, not added", hostName, clusterName)
 				return nil
 			}
 		} else {
-			glog.V(5).Infof("host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
+			glog.V(5).Infof(TSL+"host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
 			return nil
 		}
 	}
-	glog.Errorf("error adding host %s to cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
+	glog.Errorf(TSE+"error adding host %s to cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
 		hostName, clusterName, retry, lastErr, string(lastOut))
 	return lastErr
+}
+
+func SetAnnotation(pod *api.Pod, key, value string) {
+	if pod.ObjectMeta.Annotations == nil {
+		pod.ObjectMeta.Annotations = map[string]string{}
+	}
+	pod.ObjectMeta.Annotations[key] = value
 }

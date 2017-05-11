@@ -223,5 +223,5 @@ func (*IntervalClock) Sleep(d time.Duration) {
 // profile execution time of functions
 func ExecTime(start time.Time, function, detail string) {
 	elapsed := time.Since(start)
-	glog.V(4).Infof("exectime of %s was %d ns, detail: %s", function, elapsed.Nanoseconds(), detail)
+	glog.V(4).Infof("TSLOG exectime %s %d ms, detail: %s", function, elapsed.Nanoseconds()/1000000, detail)
 }

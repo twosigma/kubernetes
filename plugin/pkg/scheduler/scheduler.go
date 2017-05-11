@@ -123,11 +123,11 @@ func (s *Scheduler) scheduleOne() {
 	// go with a simple hard coded version as poc
 	if token, ok := assumed.ObjectMeta.Annotations[krbutils.TSTokenAnnotation]; ok {
 		// first we check if "ts/token" is present, if so we decode the token and re-encrypt
-		glog.Infof("got %s=%s", krbutils.TSTokenAnnotation, token)
+		glog.Infof(krbutils.TSL+"got %s=%s", krbutils.TSTokenAnnotation, token)
 
 		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
 		if err != nil {
-			glog.Errorf("failed to create tmp file: %v", err)
+			glog.Errorf(krbutils.TSE+"failed to create tmp file: %v", err)
 		} else {
 			tmpFile := file.Name()
 			defer os.Remove(tmpFile)
@@ -141,16 +141,16 @@ func (s *Scheduler) scheduleOne() {
 			cmd.SetEnv([]string{env})
 			stdin, err := cmd.StdinPipe()
 			if err != nil {
-				glog.Errorf("unable to obtain stdin of child process: %v", err)
+				glog.Errorf(krbutils.TSE+"unable to obtain stdin of child process: %v", err)
 			} else {
 				io.WriteString(stdin, token+"\n")
 				stdin.Close()
 				out, err := cmd.CombinedOutput()
 				if err == nil {
 					tokenFile = tmpFile
-					glog.Infof("token decrypt successfully to %s", tmpFile)
+					glog.Infof(krbutils.TSL+"token decrypt successfully to %s", tmpFile)
 				} else {
-					glog.Errorf("unable to decode token: %s", out)
+					glog.Errorf(krbutils.TSE+"unable to decode token: %s", out)
 				}
 			}
 		}
@@ -159,11 +159,11 @@ func (s *Scheduler) scheduleOne() {
 			// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
 			realm := krbutils.KerberosRealm
 			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof("got %s=%s, KerberosRealm=%s, trying to create token from prestashed ticket",
+			glog.Infof(krbutils.TSL+"got %s=%s, KerberosRealm=%s, trying to create token from prestashed ticket",
 				krbutils.TSRunAsUserAnnotation, user, realm)
 			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir+"@%s/%s", realm, user)
 			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
-				glog.Errorf("prestashed ticket for %s@%s does not exist", user, realm)
+				glog.Errorf(krbutils.TSE+"prestashed ticket for %s@%s does not exist", user, realm)
 			} else {
 				tokenFile = tktPath
 			}
@@ -180,10 +180,10 @@ func (s *Scheduler) scheduleOne() {
 		cmd.SetEnv([]string{env})
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			glog.V(5).Infof("token created: %s", out)
+			glog.V(5).Infof(krbutils.TSL+"token created: %s", out)
 			assumed.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = string(out)
 		} else {
-			glog.Errorf("token generation failed: %v; output: %v; dest=%v; env=%v",
+			glog.Errorf(krbutils.TSE+"token generation failed: %v; output: %v; dest=%v; env=%v",
 				err, string(out), dest, env)
 		}
 	}
