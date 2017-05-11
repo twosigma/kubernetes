@@ -3219,6 +3219,48 @@ var OpenAPIDefinitions *common.OpenAPIDefinitions = &common.OpenAPIDefinitions{
 							Format:      "",
 						},
 					},
+					"TSLockKerberos": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdServerList": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
+									},
+								},
+							},
+						},
+					},
+					"TSLockEtcdKeyFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL key file used to secure etcd communication.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdCertFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL certification file used to secure etcd communication.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdCAFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL Certificate Authority file used to secure etcd communication.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"TypeMeta", "podManifestPath", "syncFrequency", "fileCheckFrequency", "httpCheckFrequency", "manifestURL", "manifestURLHeader", "enableServer", "address", "port", "readOnlyPort", "tlsCertFile", "tlsPrivateKeyFile", "certDirectory", "authentication", "authorization", "hostnameOverride", "podInfraContainerImage", "dockerEndpoint", "rootDirectory", "seccompProfileRoot", "allowPrivileged", "hostNetworkSources", "hostPIDSources", "hostIPCSources", "registryPullQPS", "registryBurst", "eventRecordQPS", "eventBurst", "enableDebuggingHandlers", "minimumGCAge", "maxPerPodContainerCount", "maxContainerCount", "cAdvisorPort", "healthzPort", "healthzBindAddress", "oomScoreAdj", "registerNode", "clusterDomain", "masterServiceNamespace", "clusterDNS", "streamingConnectionIdleTimeout", "nodeStatusUpdateFrequency", "imageMinimumGCAge", "imageGCHighThresholdPercent", "imageGCLowThresholdPercent", "lowDiskSpaceThresholdMB", "volumeStatsAggPeriod", "networkPluginName", "networkPluginMTU", "networkPluginDir", "cniConfDir", "cniBinDir", "volumePluginDir", "containerRuntime", "remoteRuntimeEndpoint", "remoteImageEndpoint", "lockFilePath", "exitOnLockContention", "hairpinMode", "babysitDaemons", "maxPods", "nvidiaGPUs", "dockerExecHandlerName", "podCIDR", "resolvConf", "cpuCFSQuota", "containerized", "maxOpenFiles", "reconcileCIDR", "registerSchedulable", "contentType", "kubeAPIQPS", "kubeAPIBurst", "serializeImagePulls", "nodeLabels", "nonMasqueradeCIDR", "enableCustomMetrics", "podsPerCore", "enableControllerAttachDetach", "systemReserved", "kubeReserved", "protectKernelDefaults", "makeIPTablesUtilChains", "iptablesMasqueradeBit", "iptablesDropBit", "featureGates"},
 			},
@@ -16622,6 +16664,48 @@ var OpenAPIDefinitions *common.OpenAPIDefinitions = &common.OpenAPIDefinitions{
 						SchemaProps: spec.SchemaProps{
 							Description: "This flag, if set, makes kubelet generate custom /etc/resolv.conf file",
 							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"TSLockKerberos": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdServerList": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
+									},
+								},
+							},
+						},
+					},
+					"TSLockEtcdKeyFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL key file used to secure etcd communication.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdCertFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL certification file used to secure etcd communication.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"TSLockEtcdCAFile": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: SSL Certificate Authority file used to secure etcd communication.",
+							Type:        []string{"string"},
 							Format:      "",
 						},
 					},

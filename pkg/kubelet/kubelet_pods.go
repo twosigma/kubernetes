@@ -53,6 +53,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/clock"
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
 	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
+	lock "k8s.io/kubernetes/pkg/util/lock"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/util/term"
 	utilvalidation "k8s.io/kubernetes/pkg/util/validation"
@@ -166,7 +167,7 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 	return mounts, nil
 }
 
-func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clusterDomain, nodeHostname string, podServiceClusters []string, customResolvConf bool) ([]kubecontainer.Mount, error) {
+func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clusterDomain, nodeHostname string, customResolvConf bool) ([]kubecontainer.Mount, error) {
 	tsMounts := []kubecontainer.Mount{}
 
 	// Set up Kerberos ticket
@@ -203,11 +204,17 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clust
 			needCerts = true
 		}
 
+		podKDCClusters, err := kl.GetAllPodKDCClusterNames(pod)
+		if err != nil {
+			glog.Errorf("error while getting KDC clusters for the POD %s, error: %v", pod.Name, err)
+			return nil, err
+		}
+
 		if needKeytabs || needCerts {
 			// create required KDC clusters and join the node to them. Also, if services != "" then request keytabs and
 			// create bind mount for keytab file.
 			glog.V(5).Infof("managing KDC clusters for keytabs/certs for the Pod %s user %s and services %+v", pod.Name, user, services)
-			tktMount, err := makeKeytabMount(podDir, clusterDomain, pod, services, nodeHostname, realm, podServiceClusters, user)
+			tktMount, err := kl.makeKeytabMount(podDir, clusterDomain, pod, services, nodeHostname, realm, podKDCClusters, user)
 			if err != nil {
 				glog.Errorf("unable to create keytab for Pod %s user %s and services %s: %+v", pod.Name, user, services, err)
 				return nil, err
@@ -225,7 +232,7 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podDir string, podIP string, clust
 			// create certificates
 			glog.V(5).Infof("creating certs for the Pod %s and user %s", pod.Name, user)
 			certsMount, err := makeCertMount(podDir, clusterDomain, pod, nodeHostname, realm,
-				podServiceClusters, user)
+				podKDCClusters, user)
 			if err != nil {
 				glog.Errorf("unable to create certs for Pod %s and user %s, error %+v", pod.Name, user, err)
 				return nil, err
@@ -312,9 +319,9 @@ func (kl *Kubelet) createResolveFile(resolveFilePath, podNamespace, clusterDomai
 	return ioutil.WriteFile(resolveFilePath, buffer.Bytes(), 0644)
 }
 
-func makeCertMount(podDir, clusterDomain string, pod *api.Pod, hostName, realm string, podServiceClusters []string, user string) (*kubecontainer.Mount, error) {
+func makeCertMount(podDir, clusterDomain string, pod *api.Pod, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
 	certsFilePath := path.Join(podDir, krbutils.CertsDirForPod)
-	if err := createCerts(certsFilePath, clusterDomain, pod, hostName, realm, podServiceClusters, user); err != nil {
+	if err := createCerts(certsFilePath, clusterDomain, pod, hostName, realm, podKDCClusters, user); err != nil {
 		return nil, err
 	}
 	return &kubecontainer.Mount{
@@ -325,18 +332,10 @@ func makeCertMount(podDir, clusterDomain string, pod *api.Pod, hostName, realm s
 	}, nil
 }
 
-func createCerts(dest, clusterDomain string, pod *api.Pod, hostName, realm string, podServiceClusters []string, user string) error {
+func createCerts(dest, clusterDomain string, pod *api.Pod, hostName, realm string, podKDCClusters map[string]bool, user string) error {
 	defer clock.ExecTime(time.Now(), "createCerts", pod.Name)
-	podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, clusterDomain)
-	if err != nil {
-		glog.V(2).Infof("Failed to get KDC cluster names for the Pod %s, not removing node from the cluster, err: %v",
-			pod.Name, err)
-		return err
-	}
-
 	// refresh the actual certs file on the node
-	podServiceClusters = append(podServiceClusters, podClusterNames...)
-	for _, clusterName := range podServiceClusters {
+	for clusterName, _ := range podKDCClusters {
 		// request creation of the certificate
 		glog.V(4).Infof("will refresh certificate for pod %s and cluster %s", pod.Name, clusterName)
 		if err := refreshCerts(clusterName, dest, user); err != nil {
@@ -431,9 +430,9 @@ func refreshCerts(clusterName, certsDir, user string) error {
 	return nil
 }
 
-func makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podServiceClusters []string, user string) (*kubecontainer.Mount, error) {
+func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
 	keytabFilePath := path.Join(podDir, krbutils.KeytabDirForPod)
-	if err := createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podServiceClusters, user); err != nil {
+	if err := kl.createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podKDCClusters, user); err != nil {
 		return nil, err
 	}
 	// return mount only if at least one service was requested. Empty services indicate user asked for certs but not for keytabs in which case
@@ -450,41 +449,54 @@ func makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string
 	}
 }
 
-func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podServiceClusters []string, user string) error {
+func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) error {
 	defer clock.ExecTime(time.Now(), "createKeytab", pod.Name)
-	// Register the singleton cluster for the POD in the KDC
-	podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, clusterDomain)
+	var err error
+	// retrieve keys and versions from the host keytab file
+	hostKeyVersions, clusterNames, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
-		glog.V(2).Infof("Failed to get KDC cluster name for the Pod %s, not removing node from the cluster, err: %v",
-			pod.Name, err)
+		glog.Errorf("Retrieval of keytab key versions from host keytab file %s failed, error: %+v", krbutils.HostKeytabFile, err)
 		return err
+	}
+
+	var mutex *lock.Mutex
+	if kl.kubeletConfiguration.TSLockKerberos {
+		mutex, err = lock.NewMutex(
+			kl.kubeletConfiguration.TSLockEtcdServerList,
+			kl.kubeletConfiguration.TSLockEtcdCertFile,
+			kl.kubeletConfiguration.TSLockEtcdKeyFile,
+			kl.kubeletConfiguration.TSLockEtcdCAFile)
+	} else {
+		mutex = nil
 	}
 
 	// Refresh the actual keytab file on the node. The content relevant to this Pod will be extracted
 	// and copied to the Pod directory (for bind-mount) based on krb5_keytab callback invoking
 	// REST API of the kubelet at URL/refreshkeytabs.
-	podServiceClusters = append(podServiceClusters, podClusterNames...)
-	for _, clusterName := range podServiceClusters {
-		// TODO: check if possible to optimize as not to attempt registration of service level cluster
-		// many times (per each Pod selected by the service). Parameter may need to be added to the
-		// endpoints_controller to pass cluster domain name (for now not done).
-		// register cluster in KDC
-		if err = krbutils.RegisterClusterInKDC(clusterName); err != nil {
-			glog.Errorf("error registering cluster %s in KDC, error: %+v", clusterName, err)
-			return err
+	for clusterName, _ := range podKDCClusters {
+		// optimize as not to attempt registration of service level cluster
+		// many times (per each Pod selected by the service).
+		// If the cluster already present in host keytab then node is already a member and no need to register.
+		if _, ok := clusterNames[clusterName]; !ok {
+			//Register cluster in KDC
+			if err = krbutils.RegisterClusterInKDC(clusterName, mutex); err != nil {
+				glog.Errorf("error registering cluster %s in KDC, error: %+v", clusterName, err)
+				return err
+			}
+			// Add node to the virtual cluster in KDC
+			if err := krbutils.AddHostToClusterInKDC(clusterName, hostName, mutex); err != nil {
+				glog.Errorf("error adding host %s to cluster %s in KDC, error: %v", hostName, clusterName, err)
+				return err
+			}
+		} else {
+			glog.V(4).Infof("node already a member of the cluster %s, skipped registration in KDC", clusterName)
 		}
-		// Add node to the virtual cluster in KDC
-		if err := addHostToClusterInKDC(clusterName, hostName); err != nil {
-			glog.Errorf("error adding host %s to cluster %s in KDC, error: %v", hostName, clusterName, err)
-			return err
-		}
-
 		// we only request actual keytabs if the user asked for it. If no services requested then only
 		// KDC cluster membership is managed for certs.
 		if services != "" {
 			// request refresh of the keytab
 			glog.V(4).Infof("will refresh keytab for pod %s and cluster %s", pod.Name, clusterName)
-			if err := refreshKeytab(clusterName, services, realm); err != nil {
+			if err := kl.refreshKeytab(clusterName, services, realm, hostKeyVersions); err != nil {
 				glog.Errorf("error getting keytab file for cluster %s and services %+v, error: %v", clusterName, services, err)
 				return err
 			}
@@ -496,7 +508,7 @@ func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hos
 	// turns out callback may fail to happen...
 	// verify that the Pod got the service keytabs it asked for
 	// it is additional robustness if teh callback from krb5_keytab did not come
-	if err := verifyAndFixKeytab(pod, services, hostName, realm, podServiceClusters, dest, user); err != nil {
+	if err := verifyAndFixKeytab(pod, services, hostName, realm, podKDCClusters, dest, user); err != nil {
 		glog.Errorf("failed to fix and verify keytab for Pod %s, error: %+v", pod.Name, err)
 		return err
 	} else {
@@ -505,25 +517,26 @@ func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hos
 }
 
 // retrieve Kerberos key versions present in the keytab file
-func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, error) {
+func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string]bool, error) {
 	keyVersions := map[string]int{}
+	clusterNames := map[string]bool{}
 	// check if the file exists and, if it does not, return an empty map
 	if _, err := os.Stat(keytabFilePath); err != nil {
 		if os.IsNotExist(err) {
-			return keyVersions, nil
+			return keyVersions, clusterNames, nil
 		} else {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// list all entries in the keytab file
 	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilePath + "\nlist\nq\n"}, []string{})
 	if err != nil {
 		glog.Errorf("exec with pipe failed, error %v", err)
-		return nil, err
+		return nil, nil, err
 	}
 	if errb.Len() > 0 {
 		glog.Errorf("unable to list keys in keytab file %s, output %s, error %s", keytabFilePath, outb.String(), errb.String())
-		return nil, errors.New(outb.String() + " " + errb.String())
+		return nil, nil, errors.New(outb.String() + " " + errb.String())
 	}
 	re := regexp.MustCompile("  +")
 	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
@@ -549,12 +562,15 @@ func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, error) {
 			} else {
 				keyVersions[items[2]] = keyVersion
 			}
+			// extract cluster name
+			clusterName := strings.Split(strings.Split(items[2], "/")[1], "@")[0]
+			clusterNames[clusterName] = true
 		}
 	}
-	return keyVersions, nil
+	return keyVersions, clusterNames, nil
 }
 
-func refreshKeytab(clusterName, services, realm string) error {
+func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVersions map[string]int) error {
 	defer clock.ExecTime(time.Now(), "refreshKeytab", clusterName)
 	// Pull the actual keytab for requested services to the node.
 	// Services is a comma-separated list of services to include in the ticket. It is passed from
@@ -562,7 +578,29 @@ func refreshKeytab(clusterName, services, realm string) error {
 	var lastErr error
 	var lastOut []byte
 	var retry int
+	var mutex *lock.Mutex
+	var err error
+	var l *lock.Lock
+	var out []byte
+	// create connection object for Kerberos serialization
+	if kl.kubeletConfiguration.TSLockKerberos {
+		mutex, err = lock.NewMutex(
+			kl.kubeletConfiguration.TSLockEtcdServerList,
+			kl.kubeletConfiguration.TSLockEtcdCertFile,
+			kl.kubeletConfiguration.TSLockEtcdKeyFile,
+			kl.kubeletConfiguration.TSLockEtcdCAFile)
+	}
+	if err != nil {
+		glog.Errorf("Can not create Mutex")
+		return err
+	}
 	for _, srv := range strings.Split(services, ",") {
+		// check if we already have this key - and continue if we do
+		principal := srv + "/" + clusterName + "@" + realm
+		if _, ok := hostKeyVersions[principal]; ok {
+			glog.V(5).Infof("Keytab for principal %s already present, continuing", principal)
+			continue
+		}
 		// for each principal we need to create an ACL file in order to be able to request it as another user
 		data := []byte(krbutils.KeytabOwner + " " + realm + " " + srv + " " + clusterName)
 		if err := ioutil.WriteFile(krbutils.Krb5keytabAclDir+srv+"-"+clusterName, data, 0664); err != nil {
@@ -573,7 +611,19 @@ func refreshKeytab(clusterName, services, realm string) error {
 		}
 		// request the keytab refresh and retry if needed
 		for retry = 0; retry < krbutils.MaxKrb5RetryCount; retry++ {
-			if out, err := krbutils.RunCommand(krbutils.Krb5keytabPath, "-p", krbutils.KeytabOwner, srv+"/"+clusterName); err != nil {
+			if kl.kubeletConfiguration.TSLockKerberos {
+				l, err = mutex.Acquire(krbutils.EtcdGlobalFolder, "krb5_keytab", krbutils.EtcdTTL)
+			}
+			if err != nil {
+				glog.Errorf("error obtaining lock while getting key for service %s in cluster %s during %d retry, error: %v",
+					srv, clusterName, retry, err)
+				return err
+			}
+			out, err = krbutils.RunCommand(krbutils.Krb5keytabPath, "-p", krbutils.KeytabOwner, srv+"/"+clusterName)
+			if kl.kubeletConfiguration.TSLockKerberos {
+				l.Release()
+			}
+			if err != nil {
 				lastErr = err
 				lastOut = out
 				glog.Errorf("error creating service key for service %s in cluster %s during %d retry, error: %v, output: %v",
@@ -597,7 +647,7 @@ func refreshKeytab(clusterName, services, realm string) error {
 // This function is additonal fail-safe. It will check if Pod got all of the Kerberos keytab principals it needs and will
 // invoke callback REST API if it did not. The reason for this is that sometimes the security subsystem (krb5_keytab tool)
 // fails to trigger callback.
-func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllClusters []string, podDir, userName string) error {
+func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllClusters map[string]bool, podDir, userName string) error {
 	defer clock.ExecTime(time.Now(), "verifyAndFixKeytab", pod.Name)
 
 	if services == "" {
@@ -610,19 +660,19 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 
 	//generate cartesian product of services and cluster names that represents all Kerberos principals this Pod needs
 	principals := map[string]bool{}
-	for _, clusterName := range podAllClusters {
+	for clusterName, _ := range podAllClusters {
 		for _, srv := range strings.Split(services, ",") {
 			principals[srv+"/"+clusterName+"@"+realm] = true
 		}
 	}
 	glog.V(4).Infof("veryfing keytab for POD %s with podDir %s and principals %+v",
 		pod.Name, podDir, principals)
-	podKeyVersions, err := getKeyVersionsFromKeytab(podKeytabPath)
+	podKeyVersions, _, err := getKeyVersionsFromKeytab(podKeytabPath)
 	if err != nil {
 		glog.Errorf("Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", podKeytabPath, pod.Name, err)
 		return err
 	}
-	hostKeyVersions, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
+	hostKeyVersions, _, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
 		glog.Errorf("Retrieval of keytab key versions from host keytab file %s failed, error: %+v", podKeytabPath, err)
 		return err
@@ -673,34 +723,6 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 		glog.V(5).Infof("all required principals for Pod %s were found, no need to fix", pod.Name)
 	}
 	return nil
-}
-
-// Add node on which the kubelet runs to the KDC cluster
-func addHostToClusterInKDC(clusterName, hostName string) error {
-	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName+" "+hostName)
-	var lastErr error
-	var lastOut []byte
-	var retry int
-	for retry = 0; retry < krbutils.MaxKrb5RetryCount; retry++ {
-		if out, err := krbutils.RunCommand(krbutils.Krb5adminPath, "insert_hostmap", clusterName, hostName); err != nil {
-			if !strings.Contains(string(out), "is already in cluster") {
-				lastErr = err
-				lastOut = out
-				glog.Errorf("error adding host %s to cluster %s in KDC, will retry %d, error: %v, output: %v",
-					hostName, clusterName, retry, err, string(out))
-				time.Sleep(krbutils.Krb5RetrySleepSec)
-			} else {
-				glog.V(2).Infof("host %s is already in the cluster %s, not added", hostName, clusterName)
-				return nil
-			}
-		} else {
-			glog.V(5).Infof("host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
-			return nil
-		}
-	}
-	glog.Errorf("error adding host %s to cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
-		hostName, clusterName, retry, lastErr, string(lastOut))
-	return lastErr
 }
 
 func makeTktMount(podDir, userName, tkt string) (*kubecontainer.Mount, error) {
@@ -916,20 +938,14 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 		return nil, err
 	}
 
-	// compute the list of clusters the Pod is a member of (based on services selecting this Pod)
 	// create all required TS mounts (for Kerberos ticket, keytabs, certs, and custom resolve.conf)
-	if podServiceClusters, err := kl.GetPodClusters(pod); err != nil {
-		glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
+	if tsMounts, err := kl.makeTSMounts(pod, kl.getPodDir(pod.UID), podIP, kl.clusterDomain, kl.hostname,
+		kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
+		glog.Errorf("unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
 		return nil, err
 	} else {
-		if tsMounts, err := kl.makeTSMounts(pod, kl.getPodDir(pod.UID), podIP, kl.clusterDomain, kl.hostname,
-			podServiceClusters, kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
-			glog.Errorf("unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
-			return nil, err
-		} else {
-			if len(tsMounts) > 0 {
-				opts.Mounts = append(opts.Mounts, tsMounts...)
-			}
+		if len(tsMounts) > 0 {
+			opts.Mounts = append(opts.Mounts, tsMounts...)
 		}
 	}
 
@@ -1339,68 +1355,10 @@ func (kl *Kubelet) HandlePodCleanups() error {
 		}
 	}
 
-	glog.V(5).Infof("about to update service level KDC keytabs and certs")
-	needKeytabs := false
-	needCerts := false
-	realm := krbutils.KerberosRealm
-	for _, pod := range kl.GetPods() {
-		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
-			services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]
-			if ok && services != "" {
-				needKeytabs = true
-			} else {
-				services = ""
-			}
-			doCerts, ok := pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation]
-			if ok && doCerts == "true" {
-				needCerts = true
-			}
-
-			if pod.Spec.SecurityContext.RunAsUser == nil {
-				glog.V(5).Infof("Pod %s with no RunAsUser set, skipping", pod.Name)
-				continue
-			}
-
-			// compute all clusters the Pod is a member of
-			podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, kl.clusterDomain)
-			glog.V(5).Infof("will update keytabs for Pod %s and user %s", pod.Name, user)
-			podServiceClusters, err := kl.GetPodClusters(pod)
-			if err != nil {
-				glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
-					pod.Name, err)
-			}
-			podServiceClusters = append(podServiceClusters, podClusterNames...)
-
-			// only manage KDC cluster if Pod requests either keytabs or certs. In addition to KDC cluster
-			// management, createKeytab function will request actual keytab entries if services != "". In case
-			// when services == "", only cluster membership is managed (for certs)
-			if needKeytabs || needCerts {
-				keytabFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod)
-				if err := createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
-					kl.hostname, realm, podServiceClusters, user); err != nil {
-					glog.Errorf("error creating keytab (in update) for Pod %s clusters %+v services %+v, error: %v",
-						pod.Name, podServiceClusters, services, err)
-				} else {
-					glog.V(5).Infof("Updated keytab file (during Pod update) for clusters %+v and services %+v for POD %q",
-						podServiceClusters, services, format.Pod(pod))
-				}
-			}
-			if needCerts {
-				// create certs
-				glog.V(5).Infof("will update certs for Pod %s and user %s", pod.Name, user)
-				certsFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.CertsDirForPod)
-				if err := createCerts(certsFilePath, kl.clusterDomain, pod,
-					kl.hostname, realm, podServiceClusters, user); err != nil {
-					glog.Errorf("error creating certs (in update) for Pod %s clusters %+v, error: %v",
-						pod.Name, podServiceClusters, err)
-				} else {
-					glog.V(5).Infof("Updated certs file (during Pod update) for clusters %+v for POD %q",
-						podServiceClusters, format.Pod(pod))
-				}
-			}
-		}
+	// manage Kerberos for the active Pods
+	for _, pod := range kl.getActivePods() {
+		kl.podKerberosCh <- &kubecontainer.PodPair{APIPod: pod, RunningPod: nil}
 	}
-	glog.V(5).Infof("update of service level KDC keytabs and certs complete")
 
 	kl.removeOrphanedPodStatuses(allPods, mirrorPods)
 	// Note that we just killed the unwanted pods. This may not have reflected
@@ -1479,6 +1437,191 @@ func (kl *Kubelet) podKiller() {
 			killing.Delete(string(podID))
 		}
 	}
+}
+
+// podKerberosManager launches a goroutine to update Pod's Kerberos objects based on desired state.
+// The desired state includes both Pod level and service level KDC clusters.
+func (kl *Kubelet) podKerberosManager() {
+	inProgress := sets.NewString()
+	resultCh := make(chan types.UID)
+	defer close(resultCh)
+	for {
+		select {
+		case podPair, ok := <-kl.podKerberosCh:
+			if !ok {
+				return
+			}
+
+			runningPod := podPair.RunningPod
+			apiPod := podPair.APIPod
+			glog.V(2).Infof("Triggering Kerberos management for Pod %s", apiPod.ObjectMeta.Name)
+			if inProgress.Has(string(apiPod.ObjectMeta.UID)) {
+				// The pod's Kerberos is already being managed.
+				break
+			}
+			inProgress.Insert(string(apiPod.ObjectMeta.UID))
+			go func(apiPod *api.Pod, runningPod *kubecontainer.Pod, ch chan types.UID) {
+				defer func() {
+					ch <- apiPod.ObjectMeta.UID
+				}()
+				kl.podUpdateKerberos(apiPod)
+			}(apiPod, runningPod, resultCh)
+
+		case podID := <-resultCh:
+			inProgress.Delete(string(podID))
+		}
+	}
+}
+
+func (kl *Kubelet) GetAllPodKDCClusterNames(pod *api.Pod) (map[string]bool, error) {
+	glog.V(5).Infof("getting all Pod KDC clusters for Pod %s", pod.Name)
+	if allPodKDCClusters, err := krbutils.GetPodKDCClusterNames(pod, kl.clusterDomain); err != nil {
+		glog.Errorf("error while getting Pod clusters for the POD %s during update, error: %v",
+			pod.Name, err)
+		return nil, err
+	} else if podServiceClusters, err1 := kl.GetPodServiceClusters(pod); err1 != nil {
+		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+			pod.Name, err1)
+		return nil, err1
+	} else {
+		for k, v := range podServiceClusters {
+			allPodKDCClusters[k] = v
+		}
+		return allPodKDCClusters, nil
+	}
+}
+
+func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
+	var err error
+	user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]
+	if !ok {
+		// no Kerberos support for Pods without runasuser so no need to update anything
+		glog.V(5).Infof("Pod %s with no RunAsUser set, skipping", pod.Name)
+		return
+	}
+
+	glog.V(5).Infof("will update keytabs for Pod %s and user %s", pod.Name, user)
+
+	podAllClusters, err := kl.GetAllPodKDCClusterNames(pod)
+	if err != nil {
+		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+			pod.Name, err)
+	}
+
+	// check if it is delete or update
+	isDelete := pod.DeletionTimestamp != nil
+
+	if isDelete {
+		glog.V(5).Infof("The update is delete for pod %s", pod.Name)
+
+		// get clusters for all other active Pods on this node
+		nodeAllClusters, err := kl.getKDCClustersForAllPods(pod)
+		if err != nil {
+			glog.Errorf("error while getting service clusters for the PODs on the node during delete of Pod %s, error: %v",
+				pod.Name, err)
+		}
+
+		var mutex *lock.Mutex
+		if kl.kubeletConfiguration.TSLockKerberos {
+			mutex, err = lock.NewMutex(
+				kl.kubeletConfiguration.TSLockEtcdServerList,
+				kl.kubeletConfiguration.TSLockEtcdCertFile,
+				kl.kubeletConfiguration.TSLockEtcdKeyFile,
+				kl.kubeletConfiguration.TSLockEtcdCAFile)
+		} else {
+			mutex = nil
+		}
+
+		// Remove the node from the KDC clusters of the Pod. No removal of actual singleton cluster
+		// is done since the krb5_* software suite does not provide for that at the moment. The cleanup
+		// aspect should be revisited since a large number of empty singleton clusters can build up in KDC.
+		for podClusterName, _ := range podAllClusters {
+			// Check if other existing Pods are members of this cluster.
+			// We can not remove the node from such cluster.
+			if nodeAllClusters[podClusterName] {
+				continue
+			}
+			if err := krbutils.RemoveHostFromClusterInKDC(podClusterName, kl.hostname, mutex); err != nil {
+				glog.V(2).Infof("Failed to remove host %s from KDC clusters %+v for pod %q during Pod update for delete, err: %v",
+					kl.hostname, podAllClusters, format.Pod(pod), err)
+			} else {
+				glog.V(5).Infof("Removed host %s from KDC clusters %+v for pod %q during Pod update for delete",
+					kl.hostname, podAllClusters, format.Pod(pod))
+			}
+		}
+	} else {
+		glog.V(5).Infof("The update is NOT delete (a regular update) for pod %s", pod.Name)
+		// check if it has a ticket
+		if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok && !isDelete {
+			kl.refreshTSTkt(pod, user, tkt)
+		}
+		glog.V(5).Infof("about to update service level KDC keytabs and certs for Pod %s", pod.Name)
+		needKeytabs := false
+		needCerts := false
+		realm := krbutils.KerberosRealm
+		services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]
+		if ok && services != "" {
+			needKeytabs = true
+		} else {
+			services = ""
+		}
+		doCerts, ok := pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation]
+		if ok && doCerts == "true" {
+			needCerts = true
+		}
+
+		// only manage KDC cluster if Pod requests either keytabs or certs. In addition to KDC cluster
+		// management, createKeytab function will request actual keytab entries if services != "". In case
+		// when services == "", only cluster membership is managed (for certs)
+		if needKeytabs || needCerts {
+			keytabFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod)
+			if err := kl.createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
+				kl.hostname, realm, podAllClusters, user); err != nil {
+				glog.Errorf("error creating keytab (in update) for Pod %s clusters %+v services %+v, error: %v",
+					pod.Name, podAllClusters, services, err)
+			} else {
+				glog.V(5).Infof("Updated keytab file (during Pod update) for clusters %+v and services %+v for POD %q",
+					podAllClusters, services, format.Pod(pod))
+			}
+		}
+		if needCerts {
+			// create certs
+			glog.V(5).Infof("will update certs for Pod %s and user %s", pod.Name, user)
+			certsFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.CertsDirForPod)
+			if err := createCerts(certsFilePath, kl.clusterDomain, pod,
+				kl.hostname, realm, podAllClusters, user); err != nil {
+				glog.Errorf("error creating certs (in update) for Pod %s clusters %+v, error: %v",
+					pod.Name, podAllClusters, err)
+			} else {
+				glog.V(5).Infof("Updated certs file (during Pod update) for clusters %+v for POD %q",
+					podAllClusters, format.Pod(pod))
+			}
+		}
+	}
+	glog.V(5).Infof("update of service level KDC keytabs and certs complete")
+}
+
+// compute the list of all KDC clusters of all Pods on this node except for Pod pod (which is being removed)
+func (kl *Kubelet) getKDCClustersForAllPods(pod *api.Pod) (map[string]bool, error) {
+	glog.V(4).Infof("Getting KDC clusters of all other (than %s) Pods on the node", pod.Name)
+	allClusters := make(map[string]bool)
+	for _, p := range kl.getActivePods() {
+		glog.V(4).Infof("Getting clusters of Pod %s while verifying node removal", p.Name)
+		// skip the Pod we are removing - no need to check for it
+		if p.ObjectMeta.UID == pod.ObjectMeta.UID {
+			continue
+		}
+		tmpClusters, err := kl.GetAllPodKDCClusterNames(p)
+		if err != nil {
+			glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
+				p.Name, err)
+			return nil, err
+		}
+		for k, v := range tmpClusters {
+			allClusters[k] = v
+		}
+	}
+	return allClusters, nil
 }
 
 // checkHostPortConflicts detects pods with conflicted host ports.

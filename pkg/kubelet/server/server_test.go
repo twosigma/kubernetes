@@ -134,8 +134,8 @@ func (fk *fakeKubelet) GetClusterDomain() string {
 	return "cluster.local"
 }
 
-func (fk *fakeKubelet) GetPodClusters(pod *api.Pod) ([]string, error) {
-     return []string{},nil
+func (fk *fakeKubelet) GetPodServiceClusters(pod *api.Pod) ([]string, error) {
+	return []string{}, nil
 }
 
 func (fk *fakeKubelet) RunInContainer(podFullName string, uid types.UID, containerName string, cmd []string) ([]byte, error) {

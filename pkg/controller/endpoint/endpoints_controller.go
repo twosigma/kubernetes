@@ -352,6 +352,7 @@ func (e *EndpointController) syncService(key string) error {
 		kdcClusterName := name + "." + namespace + ".svc." + e.clusterDomain
 		glog.V(4).Infof("Service %s/%s deleted, will empty KDC cluster %s",
 			namespace, name, kdcClusterName)
+		// TODO: this should also be serialized - leaving for now given majority of concurrency happens in the kubelets
 		if errClean := krbutils.CleanServiceInKDC(kdcClusterName); errClean != nil {
 			glog.Errorf("error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
 		}

@@ -258,4 +258,15 @@ func (s *KubeletServer) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&s.ExperimentalCheckNodeCapabilitiesBeforeMount, "experimental-check-node-capabilities-before-mount", s.ExperimentalCheckNodeCapabilitiesBeforeMount, "[Experimental] if set true, the kubelet will check the underlying node for required componenets (binaries, etc.) before performing the mount")
 	fs.BoolVar(&s.TSHostnameFqdn, "ts-hostname-fqdn", s.TSHostnameFqdn, "If true the Kubelet will set Pod hostname to its fqdn.")
 	fs.BoolVar(&s.TSCustomResolvConf, "ts-enable-custom-resolv-conf", s.TSCustomResolvConf, "If true, the Kubelet will generate customized /etc/resolv.conf for the Pod.")
+	// Kerberos locking related parameters
+	fs.BoolVar(&s.TSLockKerberos, "ts-kerberos-lock", s.TSLockKerberos,
+		"TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).")
+	fs.StringSliceVar(&s.TSLockEtcdServerList, "ts-etcd-servers", s.TSLockEtcdServerList,
+		"TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.")
+	fs.StringVar(&s.TSLockEtcdKeyFile, "ts-etcd-keyfile", s.TSLockEtcdKeyFile,
+		"TS Kerberos locking: SSL key file used to secure etcd communication.")
+	fs.StringVar(&s.TSLockEtcdCertFile, "ts-etcd-certfile", s.TSLockEtcdCertFile,
+		"TS Kerberos locking: SSL certification file used to secure etcd communication.")
+	fs.StringVar(&s.TSLockEtcdCAFile, "ts-etcd-cafile", s.TSLockEtcdCAFile,
+		"TS Kerberos locking: SSL Certificate Authority file used to secure etcd communication.")
 }

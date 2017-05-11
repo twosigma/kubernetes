@@ -471,6 +471,17 @@ func DeepCopy_v1alpha1_KubeletConfiguration(in interface{}, out interface{}, c *
 		out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
 		out.TSHostnameFqdn = in.TSHostnameFqdn
 		out.TSCustomResolvConf = in.TSCustomResolvConf
+		out.TSLockKerberos = in.TSLockKerberos
+		if in.TSLockEtcdServerList != nil {
+			in, out := &in.TSLockEtcdServerList, &out.TSLockEtcdServerList
+			*out = make([]string, len(*in))
+			copy(*out, *in)
+		} else {
+			out.TSLockEtcdServerList = nil
+		}
+		out.TSLockEtcdKeyFile = in.TSLockEtcdKeyFile
+		out.TSLockEtcdCertFile = in.TSLockEtcdCertFile
+		out.TSLockEtcdCAFile = in.TSLockEtcdCAFile
 		return nil
 	}
 }

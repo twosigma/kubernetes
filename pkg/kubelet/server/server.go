@@ -196,7 +196,8 @@ type HostInterface interface {
 	GetPortForward(podName, podNamespace string, podUID types.UID) (*url.URL, error)
 	GetPodDir(podUID types.UID) string
 	GetClusterDomain() string
-	GetPodClusters(pod *api.Pod) ([]string, error)
+	GetPodServiceClusters(pod *api.Pod) (map[string]bool, error)
+	GetAllPodKDCClusterNames(pod *api.Pod) (map[string]bool, error)
 }
 
 // NewServer initializes and configures a kubelet.Server object to handle HTTP requests.
@@ -659,30 +660,23 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 	}
 	tmpFileOut := fileOut.Name()
 	defer os.Remove(tmpFileOut)
-	podClusterNames, err := krbutils.GetPodKDCClusterNames(pod, s.host.GetClusterDomain())
+
+	podAllClusters, err := s.host.GetAllPodKDCClusterNames(pod)
 	if err != nil {
-		glog.Errorf("failed to get KDC cluster name for the Pod %s, can not refresh the keytab, err: %v",
+		glog.Errorf("error while getting service clusters for the POD %s during update, error: %v",
 			pod.Name, err)
 		return nil, err
 	}
 
-	// compute the list of clusters the Pod is member of (based on services selecting this Pod)
-	podServiceClusters, err := s.host.GetPodClusters(pod)
-	if err != nil {
-		glog.Errorf("error while getting service clusters for the POD %s, error: %v", pod.Name, err)
-		return nil, err
-	}
-	podAllClusters := append(podServiceClusters, podClusterNames...)
-
 	//generate cartesian product of services and cluster names that represents all Kerberos principals this Pod needs
 	principals := map[string]bool{}
-	for _, clusterName := range podAllClusters {
+	for clusterName, _ := range podAllClusters {
 		for _, srv := range strings.Split(services, ",") {
 			principals[srv+"/"+clusterName+"@"+realm] = true
 		}
 	}
 	glog.V(4).Infof("refreshing keytab for POD %s with clusterNames %+v podDir %s for user %s and services %+v principals %+v",
-		pod.Name, podClusterNames, podDir, userName, services, principals)
+		pod.Name, podAllClusters, podDir, userName, services, principals)
 	if out, err := krbutils.RunCommand("/bin/cp", "-f", keytabFile, tmpFile); err != nil {
 		glog.Errorf("error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
 		return nil, err

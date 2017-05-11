@@ -31,6 +31,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util/clock"
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
+	lock "k8s.io/kubernetes/pkg/util/lock"
 )
 
 // constants used by Kerberos extensions
@@ -48,7 +49,13 @@ const (
 	KerberosRealm = "N.TWOSIGMA.COM"
 
 	// additional search domain to be added to container's /etc/resolv.conf
-	AdditionalSearchDomain = "app.twosigma.com twosigma.com"
+	AdditionalSearchDomain = "twosigma.com app.twosigma.com"
+
+	// Etcd subfolder for global locks
+	EtcdGlobalFolder = "global/"
+
+	// TTL for Etcd locks
+	EtcdTTL = 10
 
 	// replica-set name max length
 	RSMaxNameLength = 6
@@ -151,18 +158,18 @@ func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
 }
 
 // Get Kerberos KDC cluster name for the Pod
-func GetPodKDCClusterNames(pod *api.Pod, clusterDomain string) ([]string, error) {
-	podKDCHostnames := []string{}
+func GetPodKDCClusterNames(pod *api.Pod, clusterDomain string) (map[string]bool, error) {
+	podKDCHostnames := make(map[string]bool)
 	if userName, err := GetRunAsUsername(pod); err != nil {
-		return []string{}, err
+		return podKDCHostnames, err
 	} else {
-		podKDCHostnames = append(podKDCHostnames, pod.Name+"."+GetPodDomainName(pod, clusterDomain))
+		podKDCHostnames[pod.Name+"."+GetPodDomainName(pod, clusterDomain)] = true
 		if prefixedHostname, ok := pod.ObjectMeta.Annotations[TSPrefixedHostnameAnnotation]; ok && prefixedHostname == "true" {
-			podKDCHostnames = append(podKDCHostnames, userName+"."+pod.Name+"."+GetPodDomainName(pod, clusterDomain))
+			podKDCHostnames[userName+"."+pod.Name+"."+GetPodDomainName(pod, clusterDomain)] = true
 		}
 		if externalClusters, ok := pod.ObjectMeta.Annotations[TSExternalClustersAnnotation]; ok && externalClusters != "" {
 			for _, externalCluster := range strings.Split(externalClusters, ",") {
-				podKDCHostnames = append(podKDCHostnames, externalCluster)
+				podKDCHostnames[externalCluster] = true
 			}
 		}
 		return podKDCHostnames, nil
@@ -176,13 +183,26 @@ const (
 )
 
 // Register the cluster in Kerberos KDC
-func RegisterClusterInKDC(clusterName string) error {
+func RegisterClusterInKDC(clusterName string, mutex *lock.Mutex) error {
 	defer clock.ExecTime(time.Now(), "registerClusterInKDC", clusterName)
 	var lastErr error
 	var lastOut []byte
 	var retry int
+	var err error
+	var l *lock.Lock
 	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
-		if out, err := RunCommand("/usr/bin/krb5_admin", "create_logical_host", clusterName); err != nil {
+		if mutex != nil {
+			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_createlogicalhost", EtcdTTL)
+			if err != nil {
+				glog.Errorf("could not obtain lock, error: %v,", err)
+				return err
+			}
+		}
+		out, err := RunCommand(Krb5adminPath, "create_logical_host", clusterName)
+		if mutex != nil {
+			l.Release()
+		}
+		if err != nil {
 			if !strings.Contains(string(out), "already exists") {
 				lastErr = err
 				lastOut = out
@@ -252,13 +272,23 @@ func ExecWithPipe(cmd1Str, cmd2Str string, par1, par2 []string) (bytes.Buffer, b
 	return o, e, nil
 }
 
-func RemoveHostFromClusterInKDC(clusterName, hostName string) error {
+func RemoveHostFromClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) error {
 	defer clock.ExecTime(time.Now(), "removeHostFromClusterInKDC", clusterName+" "+hostName)
 	var lastErr error
 	var lastOut []byte
 	var retry int
+	var err error
+	var out []byte
+	var l *lock.Lock
 	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
-		if out, err := RunCommand("/usr/bin/krb5_admin", "remove_hostmap", clusterName, hostName); err != nil {
+		if mutex != nil {
+			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_removehostmap", EtcdTTL)
+		}
+		out, err = RunCommand(Krb5adminPath, "remove_hostmap", clusterName, hostName)
+		if mutex != nil {
+			l.Release()
+		}
+		if err != nil {
 			lastErr = err
 			lastOut = out
 			glog.Errorf("error removing host %s from cluster %s in KDC, will retry %d, error: %v, output: %v",
@@ -279,7 +309,7 @@ func RemoveHostFromClusterInKDC(clusterName, hostName string) error {
 func CleanServiceInKDC(clusterName string) error {
 	// krb5_admin query_host <cluster_name> | awk '($1=="member:"){print $2;}'
 	outb, errb, err := ExecWithPipe(
-		"/usr/bin/krb5_admin",
+		Krb5adminPath,
 		"awk",
 		[]string{"query_host", clusterName},
 		[]string{"-v", "p=member:", "($1==p){print $2;}"})
@@ -299,7 +329,7 @@ func CleanServiceInKDC(clusterName string) error {
 	lastErr = nil
 	for _, nodeName := range strings.Split(memberNodes, ",") {
 		glog.V(4).Infof("removing node %s from cluster %s in KDC", nodeName, clusterName)
-		if err := RemoveHostFromClusterInKDC(clusterName, nodeName); err != nil {
+		if err := RemoveHostFromClusterInKDC(clusterName, nodeName, nil); err != nil {
 			lastErr = err
 			glog.Errorf("error while removing node %s from KDC cluster %s, error %v", nodeName, clusterName, err)
 		} else {
@@ -312,4 +342,42 @@ func CleanServiceInKDC(clusterName string) error {
 	} else {
 		return nil
 	}
+}
+
+// Add node on which the kubelet runs to the KDC cluster
+func AddHostToClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) error {
+	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName+" "+hostName)
+	var lastErr error
+	var lastOut []byte
+	var retry int
+	var err error
+	var out []byte
+	var l *lock.Lock
+	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
+		if mutex != nil {
+			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_addhost", EtcdTTL)
+		}
+		out, err = RunCommand(Krb5adminPath, "insert_hostmap", clusterName, hostName)
+		if mutex != nil {
+			l.Release()
+		}
+		if err != nil {
+			if !strings.Contains(string(out), "is already in cluster") {
+				lastErr = err
+				lastOut = out
+				glog.Errorf("error adding host %s to cluster %s in KDC, will retry %d, error: %v, output: %v",
+					hostName, clusterName, retry, err, string(out))
+				time.Sleep(Krb5RetrySleepSec)
+			} else {
+				glog.V(2).Infof("host %s is already in the cluster %s, not added", hostName, clusterName)
+				return nil
+			}
+		} else {
+			glog.V(5).Infof("host %s was added to cluster %s with output %s", hostName, clusterName, string(out))
+			return nil
+		}
+	}
+	glog.Errorf("error adding host %s to cluster %s in KDC after %d retries, giving up, error: %v, output: %v",
+		hostName, clusterName, retry, lastErr, string(lastOut))
+	return lastErr
 }

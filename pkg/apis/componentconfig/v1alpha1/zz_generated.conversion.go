@@ -413,6 +413,11 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_componentconfig_KubeletConfigu
 	out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
 	out.TSHostnameFqdn = in.TSHostnameFqdn
 	out.TSCustomResolvConf = in.TSCustomResolvConf
+	out.TSLockKerberos = in.TSLockKerberos
+	out.TSLockEtcdServerList = *(*[]string)(unsafe.Pointer(&in.TSLockEtcdServerList))
+	out.TSLockEtcdKeyFile = in.TSLockEtcdKeyFile
+	out.TSLockEtcdCertFile = in.TSLockEtcdCertFile
+	out.TSLockEtcdCAFile = in.TSLockEtcdCAFile
 	return nil
 }
 
@@ -587,6 +592,11 @@ func autoConvert_componentconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigu
 	out.ExperimentalCheckNodeCapabilitiesBeforeMount = in.ExperimentalCheckNodeCapabilitiesBeforeMount
 	out.TSHostnameFqdn = in.TSHostnameFqdn
 	out.TSCustomResolvConf = in.TSCustomResolvConf
+	out.TSLockKerberos = in.TSLockKerberos
+	out.TSLockEtcdServerList = *(*[]string)(unsafe.Pointer(&in.TSLockEtcdServerList))
+	out.TSLockEtcdKeyFile = in.TSLockEtcdKeyFile
+	out.TSLockEtcdCertFile = in.TSLockEtcdCertFile
+	out.TSLockEtcdCAFile = in.TSLockEtcdCAFile
 	return nil
 }
 
