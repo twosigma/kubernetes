@@ -507,6 +507,14 @@ func createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hos
 // retrieve Kerberos key versions present in the keytab file
 func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, error) {
 	keyVersions := map[string]int{}
+	// check if the file exists and, if it does not, return an empty map
+	if _, err := os.Stat(keytabFilePath); err != nil {
+		if os.IsNotExist(err) {
+			return keyVersions, nil
+		} else {
+			return nil, err
+		}
+	}
 	// list all entries in the keytab file
 	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilePath + "\nlist\nq\n"}, []string{})
 	if err != nil {
