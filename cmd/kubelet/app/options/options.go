@@ -261,6 +261,8 @@ func (s *KubeletServer) AddFlags(fs *pflag.FlagSet) {
 	// Kerberos locking related parameters
 	fs.BoolVar(&s.TSLockKerberos, "ts-kerberos-lock", s.TSLockKerberos,
 		"TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).")
+	fs.BoolVar(&s.TSLockKrb5KeytabOnly, "ts-lock-krb5keytab-only", s.TSLockKrb5KeytabOnly,
+		"If true the Kubelet will only lock operations of krb5_keytab (and not the other krb5_*.")
 	fs.StringSliceVar(&s.TSLockEtcdServerList, "ts-etcd-servers", s.TSLockEtcdServerList,
 		"TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.")
 	fs.StringVar(&s.TSLockEtcdKeyFile, "ts-etcd-keyfile", s.TSLockEtcdKeyFile,

@@ -3226,6 +3226,13 @@ var OpenAPIDefinitions *common.OpenAPIDefinitions = &common.OpenAPIDefinitions{
 							Format:      "",
 						},
 					},
+					"TSLockKrb5KeytabOnly": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: lock only krb5_keytab operation and not the other krb5_* operations",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
 					"TSLockEtcdServerList": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.",
@@ -16670,6 +16677,13 @@ var OpenAPIDefinitions *common.OpenAPIDefinitions = &common.OpenAPIDefinitions{
 					"TSLockKerberos": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"TSLockKrb5KeytabOnly": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TS Kerberos locking: lock only krb5_keytab operation and not the other krb5_* operations",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},

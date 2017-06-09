@@ -19,8 +19,9 @@ const (
 )
 
 type Mutex struct {
-	cl   client.Client
-	kapi client.KeysAPI
+	cl        client.Client
+	kapi      client.KeysAPI
+	transport *http.Transport
 }
 
 type Lock struct {
@@ -32,7 +33,7 @@ type Lock struct {
 // create new Mutex connection
 func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, error) {
 	defer clock.ExecTime(time.Now(), "NewMutex", "None")
-	var transport client.CancelableTransport
+	var transport *http.Transport
 	if certFile != "" && keyFile != "" && CAFile != "" {
 		glog.V(5).Infof("TSLOG TSLOCK NewMutex setting SSL certFile %s keyFile %s CAFile %s with endpoints %v",
 			certFile, keyFile, CAFile, endpoints)
@@ -60,7 +61,14 @@ func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, err
 		}
 	} else {
 		glog.V(5).Infof("TSLOG TSLOCK NewMutex setting without SSL with endpoints %v", endpoints)
-		transport = client.DefaultTransport
+		transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			Dial: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).Dial,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
 	}
 	cfg := client.Config{
 		Endpoints:               endpoints,
@@ -70,7 +78,16 @@ func NewMutex(endpoints []string, certFile, keyFile, CAFile string) (*Mutex, err
 	if cl, err := client.New(cfg); err != nil {
 		return nil, err
 	} else {
-		return &Mutex{cl: cl, kapi: client.NewKeysAPI(cl)}, nil
+		return &Mutex{cl: cl, kapi: client.NewKeysAPI(cl), transport: transport}, nil
+	}
+}
+
+func (m *Mutex) SetTTL(lock *client.Response, ttl uint64) error {
+	if _, err := m.kapi.Set(context.Background(), lock.Node.Key, lock.Node.Value,
+		&client.SetOptions{TTL: time.Duration(ttl) * time.Second}); err != nil {
+		return err
+	} else {
+		return nil
 	}
 }
 
@@ -86,13 +103,25 @@ func (m *Mutex) Acquire(key string, descr string, ttl uint64) (*Lock, error) {
 		// wait for the lock by checking if our file index is the lowest
 		for {
 			if res, err := m.kapi.Get(context.Background(), key, &client.GetOptions{Recursive: true, Sort: true}); err != nil {
-				return nil, err
+				// set TTL in case Release fails
+				if err1 := m.SetTTL(lock, ttl); err1 != nil {
+					// ignore the error since we do not have
+					glog.Errorf("TSLOG TSLOCK error when trying to set TTL on Get failure for lock %v, error: %v", lock, err1)
+				}
+				// return the lock with error so it can be released
+				return &Lock{m.kapi, lock.Node.Key, lock.Node.CreatedIndex}, err
 			} else {
 				if len(res.Node.Nodes) > 1 {
 					sort.Sort(res.Node.Nodes)
 					if res.Node.Nodes[0].CreatedIndex != lock.Node.CreatedIndex {
-						if err = m.wait(lock.Node.Key); err != nil {
-							return nil, err
+						if err = m.wait(lock.Node.Key, lock.Node.CreatedIndex); err != nil {
+							// set TTL in case Release fails
+							if err1 := m.SetTTL(lock, ttl); err1 != nil {
+								// ignore the error since we do not have
+								glog.Errorf("TSLOG TSLOCK error when trying to set TTL on Get failure for lock %v, error: %v", lock, err1)
+							}
+							// return the lock with error so it can be released
+							return &Lock{m.kapi, lock.Node.Key, lock.Node.CreatedIndex}, err
 						}
 					} else {
 						break
@@ -104,8 +133,8 @@ func (m *Mutex) Acquire(key string, descr string, ttl uint64) (*Lock, error) {
 		}
 
 		// set description and ttl
-		if _, err = m.kapi.Set(context.Background(), lock.Node.Key, lock.Node.Value,
-			&client.SetOptions{TTL: time.Duration(ttl) * time.Second}); err != nil {
+		if err = m.SetTTL(lock, ttl); err != nil {
+			glog.Errorf("TSLOG TSLOCK error when trying to set TTL for lock %v, error: %v", lock, err)
 			return nil, err
 		} else {
 			glog.V(5).Infof("TSLOG TSLOCK got lock for key %s with %s", key, lock.Node.Key)
@@ -115,7 +144,7 @@ func (m *Mutex) Acquire(key string, descr string, ttl uint64) (*Lock, error) {
 }
 
 // wait to get the lock (i.e., lowest index matching our index)
-func (m *Mutex) wait(key string) error {
+func (m *Mutex) wait(key string, myIndex uint64) error {
 	for {
 		if res, err := m.kapi.Get(context.Background(), key, nil); err != nil {
 			etcdErr, ok := err.(*client.Error)
@@ -125,11 +154,13 @@ func (m *Mutex) wait(key string) error {
 				return err
 			}
 		} else {
-			if len(res.Node.Nodes) == 0 {
+			if len(res.Node.Nodes) <= 1 {
 				break
 			} else {
 				sort.Sort(res.Node.Nodes)
 				currentLock := res.Node.Nodes[0]
+				glog.V(5).Infof("TSLOG TSLOCK about to watch %v with index my index %v and watched index %v ",
+					currentLock.Key, myIndex, currentLock.CreatedIndex)
 				n := m.kapi.Watcher(currentLock.Key, &client.WatcherOptions{})
 				if _, err = n.Next(context.Background()); err != nil {
 					return err
@@ -140,13 +171,18 @@ func (m *Mutex) wait(key string) error {
 	return nil
 }
 
+// close connection
+func Close(m *Mutex) {
+	m.transport.DisableKeepAlives = true
+	m.transport.CloseIdleConnections()
+	glog.V(5).Infof("TSLOG TSLOCK close connection")
+}
+
 // release the lock
-func (l *Lock) Release() error {
+func (l *Lock) Release() {
 	defer clock.ExecTime(time.Now(), "Release", l.key)
 	glog.V(5).Infof("TSLOG TSLOCK release for key %s", l.key)
 	if _, err := l.kapi.Delete(context.Background(), l.key, &client.DeleteOptions{}); err != nil {
-		return err
-	} else {
-		return nil
+		glog.Errorf("TSLOG TSLOCK error while releasing lock %s, error: %v", l.key, err)
 	}
 }

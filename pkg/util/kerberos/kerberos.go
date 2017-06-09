@@ -52,7 +52,7 @@ const (
 	EtcdGlobalFolder = "global/"
 
 	// TTL for Etcd locks
-	EtcdTTL = 10
+	EtcdTTL = 120
 
 	// replica-set name max length
 	RSMaxNameLength = 6
@@ -187,25 +187,31 @@ const (
 )
 
 // Register the cluster in Kerberos KDC
-func RegisterClusterInKDC(clusterName string, mutex *lock.Mutex) error {
+func RegisterClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) error {
 	defer clock.ExecTime(time.Now(), "registerClusterInKDC", clusterName)
 	var lastErr error
 	var lastOut []byte
 	var retry int
 	var err error
 	var l *lock.Lock
-	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
-		if mutex != nil {
-			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_createlogicalhost", EtcdTTL)
-			if err != nil {
-				glog.Errorf(TSE+"could not obtain lock, error: %v,", err)
-				return err
+
+	if mutex != nil {
+		l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_createlogicalhost "+hostName+" "+clusterName, EtcdTTL)
+		if err != nil {
+			glog.Errorf(TSE+"error obtaining lock registering cluster %s during %d retry, error: %v",
+				clusterName, retry, err)
+			// attempt release to make sure no lock left
+			if l != nil {
+				l.Release()
 			}
+			return err
+		} else {
+			defer l.Release()
 		}
+	}
+
+	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
 		out, err := RunCommand(Krb5adminPath, "create_logical_host", clusterName)
-		if mutex != nil {
-			l.Release()
-		}
 		if err != nil {
 			if !strings.Contains(string(out), "already exists") {
 				lastErr = err
@@ -295,15 +301,25 @@ func RemoveHostFromClusterInKDC(clusterName, hostName string, mutex *lock.Mutex)
 		glog.V(4).Infof(TSL+"cluster %s has no member %s, no need to remove", clusterName, hostName)
 		return nil
 	}
+
+	if mutex != nil {
+		l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_removehostmap "+hostName+" "+clusterName, EtcdTTL)
+		if err != nil {
+			glog.Errorf(TSE+"error obtaining lock while removing host %s from cluster %s during %d retry, error: %v",
+				hostName, clusterName, retry, err)
+			// attempt release to make sure no lock left
+			if l != nil {
+				l.Release()
+			}
+			return err
+		} else {
+			defer l.Release()
+		}
+	}
+
 	// remove the node hostName from the KDC cluster
 	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
-		if mutex != nil {
-			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_removehostmap", EtcdTTL)
-		}
 		out, err = RunCommand(Krb5adminPath, "remove_hostmap", clusterName, hostName)
-		if mutex != nil {
-			l.Release()
-		}
 		if err != nil {
 			lastErr = err
 			lastOut = out
@@ -376,6 +392,23 @@ func CleanServiceInKDC(clusterName string) error {
 	}
 }
 
+func CheckIfHostInInKDCCluster(clusterName, hostName string) (bool, error) {
+	var err error
+	var out []byte
+
+	out, err = RunCommand(Krb5adminPath, "query_host", clusterName)
+	if err != nil {
+		glog.Errorf(TSL+"TSERR error query_host for cluster %s, error: %v, output: %v", clusterName, err, string(out))
+		return false, err
+	} else {
+		if strings.Contains(string(out), hostName) {
+			return true, nil
+		} else {
+			return false, nil
+		}
+	}
+}
+
 // Add node on which the kubelet runs to the KDC cluster
 func AddHostToClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) error {
 	defer clock.ExecTime(time.Now(), "addHostToClusterInKDC", clusterName+" "+hostName)
@@ -385,14 +418,24 @@ func AddHostToClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) erro
 	var err error
 	var out []byte
 	var l *lock.Lock
+
+	if mutex != nil {
+		l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_addhost "+hostName+" "+clusterName, EtcdTTL)
+		if err != nil {
+			glog.Errorf(TSE+"error obtaining lock while adding host %s to cluster %s during %d retry, error: %v",
+				hostName, clusterName, retry, err)
+			// attempt release to make sure no lock left
+			if l != nil {
+				l.Release()
+			}
+			return err
+		} else {
+			defer l.Release()
+		}
+	}
+
 	for retry = 0; retry < MaxKrb5RetryCount; retry++ {
-		if mutex != nil {
-			l, err = mutex.Acquire(EtcdGlobalFolder, "krb5_admin_addhost", EtcdTTL)
-		}
 		out, err = RunCommand(Krb5adminPath, "insert_hostmap", clusterName, hostName)
-		if mutex != nil {
-			l.Release()
-		}
 		if err != nil {
 			if !strings.Contains(string(out), "is already in cluster") {
 				lastErr = err

@@ -472,6 +472,7 @@ func DeepCopy_v1alpha1_KubeletConfiguration(in interface{}, out interface{}, c *
 		out.TSHostnameFqdn = in.TSHostnameFqdn
 		out.TSCustomResolvConf = in.TSCustomResolvConf
 		out.TSLockKerberos = in.TSLockKerberos
+		out.TSLockKrb5KeytabOnly = in.TSLockKrb5KeytabOnly
 		if in.TSLockEtcdServerList != nil {
 			in, out := &in.TSLockEtcdServerList, &out.TSLockEtcdServerList
 			*out = make([]string, len(*in))

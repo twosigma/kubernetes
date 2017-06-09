@@ -479,6 +479,8 @@ type KubeletConfiguration struct {
 	TSCustomResolvConf bool `json:"TSCustomResolvConf,omitempty"`
 	// TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).
 	TSLockKerberos bool `json:"TSLockKerberos,omitempty"`
+	// TS Kerberos locking: lock only krb5_keytab operation and not the other krb5_* operations
+	TSLockKrb5KeytabOnly bool `json:"TSLockKrb5KeytabOnly,omitempty"`
 	// TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.
 	TSLockEtcdServerList []string `json:"TSLockEtcdServerList,omitempty"`
 	// TS Kerberos locking: SSL key file used to secure etcd communication.

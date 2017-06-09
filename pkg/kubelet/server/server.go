@@ -567,7 +567,7 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 	defer keytabLock.Unlock()
 
 	defer clock.ExecTime(time.Now(), "refreshKeytabs", "")
-
+	trimKeytab := true
 	glog.V(4).Infof(krbutils.TSL+"starting Keytab refresh in REST servlet, lock wait time was %d ns", time.Since(startLock).Nanoseconds())
 
 	var lastError error
@@ -584,6 +584,15 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 			return
 		}
 		keytabFile := values["keytabpath"][0]
+		if v, ok := values["trimkeytab"]; ok {
+			if v[0] == "true" {
+				trimKeytab = true
+			} else {
+				trimKeytab = false
+			}
+		} else {
+			trimKeytab = true
+		}
 		glog.V(4).Infof(krbutils.TSL+"Keytab file (to be distributed to containers) is %s", keytabFile)
 
 		pods := s.host.GetPods()
@@ -593,6 +602,10 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
 					if pod.Spec.SecurityContext.RunAsUser != nil {
+						// skip the Pods being deleted
+						if pod.DeletionTimestamp != nil {
+							continue
+						}
 						glog.V(5).Infof(krbutils.TSL+"will refresh keytab file for pod %s", pod.Name)
 						// extract from global keytab file the parts relevant to this POD
 						if principals, err := s.refreshKeytab(keytabFile, pod, user, services, realm); err != nil {
@@ -614,7 +627,7 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 		if lastError != nil {
 			glog.V(3).Infof(krbutils.TSL+"keytab distribution to containers failed, reporting last error %+v", lastError.Error())
 			response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
-		} else {
+		} else if trimKeytab {
 			if nodeHostname, err := os.Hostname(); err != nil {
 				glog.Errorf(krbutils.TSE+"could not retrieve hostname of the node, error: %+v", err)
 			} else {
@@ -628,6 +641,8 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 					glog.V(2).Infof(krbutils.TSL + "Ending Keytab refresh in REST servlet with success")
 				}
 			}
+		} else {
+			glog.V(4).Infof(krbutils.TSL + "skipping keytab trimming")
 		}
 	}
 }
@@ -651,7 +666,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		return nil, err
 	}
 	tmpFile := file.Name()
-	defer os.Remove(tmpFile)
+	//	defer os.Remove(tmpFile)
 
 	fileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
 	if err != nil {
@@ -659,7 +674,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		return nil, err
 	}
 	tmpFileOut := fileOut.Name()
-	defer os.Remove(tmpFileOut)
+	//	defer os.Remove(tmpFileOut)
 
 	podAllClusters, err := s.host.GetAllPodKDCClusterNames(pod)
 	if err != nil {
@@ -757,7 +772,7 @@ func trimKeytabFile(keytabFile string, allNeededPrincipals map[string]bool) erro
 		return err
 	}
 	tmpFileOutName := tmpFileOut.Name()
-	defer os.Remove(tmpFileOutName)
+	//	defer os.Remove(tmpFileOutName)
 
 	if err := extractKeytab(keytabFile, tmpFileOutName, allNeededPrincipals); err != nil {
 		glog.Errorf(krbutils.TSE+"failed to extract keytab for trimming: %+v", err)

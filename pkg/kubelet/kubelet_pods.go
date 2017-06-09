@@ -481,7 +481,7 @@ func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, s
 	}
 	if !exists {
 		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_KEYTABS_MOUNT_START", "POD %s", pod.Name)
-		if err := kl.createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podKDCClusters, user); err != nil {
+		if err := kl.createKeytab(keytabFilePath, clusterDomain, pod, services, hostName, realm, podKDCClusters, user, true); err != nil {
 			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_KEYTABS_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
 			return nil, err
 		}
@@ -497,14 +497,21 @@ func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, s
 	}, nil
 }
 
-func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) error {
+func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string, force bool) error {
 	defer clock.ExecTime(time.Now(), "createKeytab", pod.Name)
 	var err error
-	var mutex *lock.Mutex
+	var mutex *lock.Mutex = nil
+
 	// retrieve keys and versions from the host keytab file
-	hostKeyVersions, clusterNames, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
+	hostKeyVersions, _, _, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
 		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from host keytab file %s failed, error: %+v", krbutils.HostKeytabFile, err)
+		return err
+	}
+	// retrieve keys and versions from the Pod keytab file
+	podKeyVersions, _, _, err := getKeyVersionsFromKeytab(path.Join(dest, user))
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", dest, pod.Name, err)
 		return err
 	}
 
@@ -515,19 +522,22 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 		// optimize as not to attempt registration of service level cluster
 		// many times (per each Pod selected by the service).
 		// If the cluster already present in host keytab then node is already a member and no need to register.
-		if _, ok := clusterNames[clusterName]; !ok {
-			if kl.kubeletConfiguration.TSLockKerberos {
+		if inCluster, err := krbutils.CheckIfHostInInKDCCluster(clusterName, hostName); err != nil || !inCluster {
+			// was not able to get the status of KDC cluster or got it and hostName is not there - register
+			if kl.kubeletConfiguration.TSLockKerberos && !kl.kubeletConfiguration.TSLockKrb5KeytabOnly && mutex == nil {
 				mutex, err = lock.NewMutex(
 					kl.kubeletConfiguration.TSLockEtcdServerList,
 					kl.kubeletConfiguration.TSLockEtcdCertFile,
 					kl.kubeletConfiguration.TSLockEtcdKeyFile,
 					kl.kubeletConfiguration.TSLockEtcdCAFile)
-			} else {
-				mutex = nil
+				if err != nil {
+					glog.Errorf(krbutils.TSE + "Can not create Mutex")
+					return err
+				}
+				defer lock.Close(mutex)
 			}
-
 			//Register cluster in KDC
-			if err = krbutils.RegisterClusterInKDC(clusterName, mutex); err != nil {
+			if err = krbutils.RegisterClusterInKDC(clusterName, hostName, mutex); err != nil {
 				glog.Errorf(krbutils.TSE+"error registering cluster %s in KDC, error: %+v", clusterName, err)
 				return err
 			}
@@ -544,7 +554,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 		if services != "" {
 			// request refresh of the keytab
 			glog.V(4).Infof(krbutils.TSL+"will refresh keytab for pod %s and cluster %s", pod.Name, clusterName)
-			if err := kl.refreshKeytab(clusterName, services, realm, hostKeyVersions); err != nil {
+			if err := kl.refreshKeytab(clusterName, services, realm, hostKeyVersions, podKeyVersions, force); err != nil {
 				glog.Errorf(krbutils.TSE+"error getting keytab file for cluster %s and services %+v, error: %v", clusterName, services, err)
 				return err
 			}
@@ -555,7 +565,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 
 	// turns out callback may fail to happen...
 	// verify that the Pod got the service keytabs it asked for
-	// it is additional robustness if teh callback from krb5_keytab did not come
+	// it is additional robustness if the callback from krb5_keytab did not come
 	if err := verifyAndFixKeytab(pod, services, hostName, realm, podKDCClusters, dest, user); err != nil {
 		glog.Errorf(krbutils.TSE+"failed to fix and verify keytab for Pod %s, error: %+v", pod.Name, err)
 		return err
@@ -565,26 +575,27 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 }
 
 // retrieve Kerberos key versions present in the keytab file
-func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string]bool, error) {
+func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string]bool, map[string]int, error) {
 	keyVersions := map[string]int{}
 	clusterNames := map[string]bool{}
+	keyCount := map[string]int{}
 	// check if the file exists and, if it does not, return an empty map
 	if _, err := os.Stat(keytabFilePath); err != nil {
 		if os.IsNotExist(err) {
-			return keyVersions, clusterNames, nil
+			return keyVersions, clusterNames, keyCount, nil
 		} else {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	// list all entries in the keytab file
 	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilePath + "\nlist\nq\n"}, []string{})
 	if err != nil {
 		glog.Errorf(krbutils.TSE+"exec with pipe failed, error %v", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if errb.Len() > 0 {
 		glog.Errorf(krbutils.TSE+"unable to list keys in keytab file %s, output %s, error %s", keytabFilePath, outb.String(), errb.String())
-		return nil, nil, errors.New(outb.String() + " " + errb.String())
+		return nil, nil, nil, errors.New(outb.String() + " " + errb.String())
 	}
 	re := regexp.MustCompile("  +")
 	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
@@ -610,15 +621,21 @@ func getKeyVersionsFromKeytab(keytabFilePath string) (map[string]int, map[string
 			} else {
 				keyVersions[items[2]] = keyVersion
 			}
+			if existingKeyCount, ok := keyCount[items[2]]; ok {
+				keyCount[items[2]] = existingKeyCount + 1
+			} else {
+				keyCount[items[2]] = 1
+			}
+
 			// extract cluster name
 			clusterName := strings.Split(strings.Split(items[2], "/")[1], "@")[0]
 			clusterNames[clusterName] = true
 		}
 	}
-	return keyVersions, clusterNames, nil
+	return keyVersions, clusterNames, keyCount, nil
 }
 
-func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVersions map[string]int) error {
+func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVersions, podKeyVersions map[string]int, force bool) error {
 	defer clock.ExecTime(time.Now(), "refreshKeytab", clusterName)
 	// Pull the actual keytab for requested services to the node.
 	// Services is a comma-separated list of services to include in the ticket. It is passed from
@@ -626,7 +643,7 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 	var lastErr error
 	var lastOut []byte
 	var retry int
-	var mutex *lock.Mutex
+	var mutex *lock.Mutex = nil
 	var err error
 	var l *lock.Lock
 	var out []byte
@@ -634,9 +651,11 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 	for _, srv := range strings.Split(services, ",") {
 		// check if we already have this key - and continue if we do
 		principal := srv + "/" + clusterName + "@" + realm
-		if _, ok := hostKeyVersions[principal]; ok {
-			glog.V(5).Infof(krbutils.TSL+"Keytab for principal %s already present, continuing", principal)
-			continue
+		if _, ok := podKeyVersions[principal]; ok {
+			if !force {
+				glog.V(5).Infof(krbutils.TSL+"Keytab for principal %s already present, continuing", principal)
+				continue
+			}
 		}
 		// for each principal we need to create an ACL file in order to be able to request it as another user
 		data := []byte(krbutils.KeytabOwner + " " + realm + " " + srv + " " + clusterName)
@@ -659,19 +678,25 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 					glog.Errorf(krbutils.TSE + "Can not create Mutex")
 					return err
 				}
+				defer lock.Close(mutex)
 			}
 
 			if kl.kubeletConfiguration.TSLockKerberos {
-				l, err = mutex.Acquire(krbutils.EtcdGlobalFolder, "krb5_keytab", krbutils.EtcdTTL)
-			}
-			if err != nil {
-				glog.Errorf(krbutils.TSE+"error obtaining lock while getting key for service %s in cluster %s during %d retry, error: %v",
-					srv, clusterName, retry, err)
-				return err
+				l, err = mutex.Acquire(krbutils.EtcdGlobalFolder, "krb5_keytab "+kl.hostname+" "+principal, krbutils.EtcdTTL)
+				if err != nil {
+					glog.Errorf(krbutils.TSE+"error obtaining lock while getting key for service %s in cluster %s during %d retry, error: %v",
+						srv, clusterName, retry, err)
+					if l != nil {
+						l.Release()
+					}
+					return err
+				}
 			}
 			out, err = krbutils.RunCommand(krbutils.Krb5keytabPath, "-p", krbutils.KeytabOwner, srv+"/"+clusterName)
 			if kl.kubeletConfiguration.TSLockKerberos {
-				l.Release()
+				if l != nil {
+					l.Release()
+				}
 			}
 			if err != nil {
 				lastErr = err
@@ -692,6 +717,26 @@ func (kl *Kubelet) refreshKeytab(clusterName, services, realm string, hostKeyVer
 		}
 	}
 	return nil
+}
+
+// call handler to refresh keytabs inside of Pods
+func invokePodKeytabRefresh(pod *api.Pod, trimKeytab bool) error {
+	data := url.Values{}
+	data.Set("keytabpath", krbutils.HostKeytabFile)
+	data.Set("trimkeytab", "false")
+	if resp, err := http.Post(krbutils.KubeletRESTServiceURL, "text/plain", bytes.NewBufferString(data.Encode())); err != nil {
+		glog.Errorf(krbutils.TSE+"invokePodKeytabRefresh for Pod %s failed, err: %+v", pod.Name, err)
+		return err
+	} else {
+		if resp.StatusCode != 200 {
+			glog.Errorf(krbutils.TSE+"invokePodKeytabRefresh for Pod %s failed, http server returned code %d with message %s",
+				pod.Name, resp.StatusCode, resp.Status)
+			return errors.New("invokePodKeytabRefresh for Pod " + pod.Name + "failed with error message from httpserver " + resp.Status)
+		} else {
+			glog.V(5).Infof(krbutils.TSL+"invokePodKeytabRefresh succeeded for Pod %s", pod.Name)
+			return nil
+		}
+	}
 }
 
 // This function is additonal fail-safe. It will check if Pod got all of the Kerberos keytab principals it needs and will
@@ -717,12 +762,12 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	}
 	glog.V(4).Infof(krbutils.TSL+"veryfing keytab for POD %s with podDir %s and principals %+v",
 		pod.Name, podDir, principals)
-	podKeyVersions, _, err := getKeyVersionsFromKeytab(podKeytabPath)
+	podKeyVersions, _, podKeyCount, err := getKeyVersionsFromKeytab(podKeytabPath)
 	if err != nil {
 		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from keytab file %s for Pod %s failed, error: %+v", podKeytabPath, pod.Name, err)
 		return err
 	}
-	hostKeyVersions, _, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
+	hostKeyVersions, _, hostKeyCount, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
 	if err != nil {
 		glog.Errorf(krbutils.TSE+"Retrieval of keytab key versions from host keytab file %s failed, error: %+v", podKeytabPath, err)
 		return err
@@ -743,6 +788,10 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 				glog.Errorf(krbutils.TSE+"expected principal %s for pod %s has version %d in Pod and version %d in host file, need to fix",
 					expectedPrincipal, pod.Name, podKeyVersion, hostKeyVersion)
 				oldKey = true
+			} else if podKeyCount[expectedPrincipal] != hostKeyCount[expectedPrincipal] {
+				glog.Errorf(krbutils.TSE+"expected principal %s for pod %s has %d versions in Pod and %d versions in host file, need to fix",
+					expectedPrincipal, pod.Name, podKeyCount[expectedPrincipal], hostKeyCount[expectedPrincipal])
+				oldKey = true
 			} else {
 				glog.V(5).Infof(krbutils.TSL+"expected principal %s for pod %s was found with key version %d", expectedPrincipal, pod.Name, podKeyVersion)
 			}
@@ -752,22 +801,14 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 	// if any requested principals are missing or key version in Pod is older than in host keytab file,
 	// trigger the fix by invoking kubelet keytab distribution
 	if len(missingPrincipals) > 0 || oldKey {
-		glog.V(2).Infof(krbutils.TSL+"attempting to fix missing or expired (older key version) principals for Pod %s", pod.Name)
+		glog.V(2).Infof(krbutils.TSL+"attempting to fix missing or expired (older key version) principals or trim on deletion for Pod %s", pod.Name)
 		// repair by calling our callback function in the kubelet server.go thread
 		// this assumes that the reason for failure is lack of callback from the security subsystem
-		data := url.Values{}
-		data.Set("keytabpath", krbutils.HostKeytabFile)
-		if resp, err := http.Post(krbutils.KubeletRESTServiceURL, "text/plain", bytes.NewBufferString(data.Encode())); err != nil {
-			glog.Errorf(krbutils.TSE+"keytab fix for Pod %s failed, err: %+v", pod.Name, err)
+		if err := invokePodKeytabRefresh(pod, false); err != nil {
+			glog.Errorf(krbutils.TSE+"fixing keytab for Pod %s failed, err: %+v", pod.Name, err)
 			return err
 		} else {
-			if resp.StatusCode != 200 {
-				glog.Errorf(krbutils.TSE+"keytab fix for Pod %s failed, http server returned code %d with message %s",
-					pod.Name, resp.StatusCode, resp.Status)
-				return errors.New("keytab fix for Pod " + pod.Name + "failed with error message from httpserver " + resp.Status)
-			} else {
-				glog.V(5).Infof(krbutils.TSL+"keytab fix succeeded for Pod %s", pod.Name)
-			}
+			glog.V(5).Infof(krbutils.TSL+"fixing keytab for Pod %s succeeded", pod.Name)
 		}
 	} else {
 		glog.V(5).Infof(krbutils.TSL+"all required principals for Pod %s were found, no need to fix", pod.Name)
@@ -1602,7 +1643,7 @@ func (kl *Kubelet) checkIfPodUsesKerberos(pod *api.Pod) (bool, bool, string, str
 func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 	defer clock.ExecTime(time.Now(), "podUpdateKerberos", pod.Name)
 	var err error
-	var mutex *lock.Mutex
+	var mutex *lock.Mutex = nil
 
 	needKeytabs := false
 	needCerts := false
@@ -1632,14 +1673,17 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 				pod.Name, err)
 		}
 
-		if kl.kubeletConfiguration.TSLockKerberos {
+		if kl.kubeletConfiguration.TSLockKerberos && !kl.kubeletConfiguration.TSLockKrb5KeytabOnly && mutex == nil {
 			mutex, err = lock.NewMutex(
 				kl.kubeletConfiguration.TSLockEtcdServerList,
 				kl.kubeletConfiguration.TSLockEtcdCertFile,
 				kl.kubeletConfiguration.TSLockEtcdKeyFile,
 				kl.kubeletConfiguration.TSLockEtcdCAFile)
-		} else {
-			mutex = nil
+			if err != nil {
+				glog.Errorf(krbutils.TSE + "Can not create Mutex")
+			} else {
+				defer lock.Close(mutex)
+			}
 		}
 
 		// Remove the node from the KDC clusters of the Pod. No removal of actual singleton cluster
@@ -1659,9 +1703,24 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 					kl.hostname, podAllClusters, format.Pod(pod))
 			}
 		}
+		/*
+			// trigger host keytab trimming
+			if err := invokePodKeytabRefresh(pod); err != nil {
+				glog.Errorf(krbutils.TSE+"trimming keytab post deletion for Pod %s failed, err: %+v", pod.Name, err)
+			} else {
+				glog.V(5).Infof(krbutils.TSL+"trimming keytab post deletion for Pod %s succeeded", pod.Name)
+			}
+		*/
 	} else {
+		// if the Pod is not yet running we should not do steady-state management of its Kerberos state
+		if pod.Status.Phase != api.PodRunning {
+			glog.V(5).Infof(krbutils.TSL+"pod %s of user %s is not running (state %v ) - not doing Kerberos management",
+				pod.Name, user, pod.Status.Phase)
+			return
+		} else {
+			glog.V(5).Infof(krbutils.TSL+"will update Kerberos keytabs and certs for Pod %s and user %s", pod.Name, user)
+		}
 		// do the Kerberos steady-state management (service level keytab management)
-		glog.V(5).Infof(krbutils.TSL+"will update Kerberos keytabs and certs for Pod %s and user %s", pod.Name, user)
 
 		// only manage KDC cluster if Pod requests either keytabs or certs. In addition to KDC cluster
 		// management, createKeytab function will request actual keytab entries if services != "". In case
@@ -1669,7 +1728,7 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 		if needKeytabs || needCerts {
 			keytabFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod)
 			if err := kl.createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
-				kl.hostname, realm, podAllClusters, user); err != nil {
+				kl.hostname, realm, podAllClusters, user, false); err != nil {
 				glog.Errorf(krbutils.TSE+"error creating keytab (in refresh) for Pod %s clusters %+v services %+v, error: %v",
 					pod.Name, podAllClusters, services, err)
 			} else {
