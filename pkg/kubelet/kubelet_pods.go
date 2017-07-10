@@ -157,7 +157,14 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 		})
 	}
 	if mountEtcHostsFile {
-		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain)
+		// check if pod has prefixed hostname annotation
+		prefix := ""
+		if tsuserprefixedhostname, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok && tsuserprefixedhostname == "true" {
+			if runAsUsername, ok1 := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok1 {
+				prefix = runAsUsername
+			}
+		}
+		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain, prefix)
 		if err != nil {
 			return nil, err
 		}
@@ -872,9 +879,9 @@ func decodeTicket(dest, data, user, group string) error {
 
 // makeHostsMount makes the mountpoint for the hosts file that the containers
 // in a pod are injected with.
-func makeHostsMount(podDir, podIP, hostName, hostDomainName string) (*kubecontainer.Mount, error) {
+func makeHostsMount(podDir, podIP, hostName, hostDomainName, prefix string) (*kubecontainer.Mount, error) {
 	hostsFilePath := path.Join(podDir, "etc-hosts")
-	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName); err != nil {
+	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName, prefix); err != nil {
 		return nil, err
 	}
 	return &kubecontainer.Mount{
@@ -888,7 +895,7 @@ func makeHostsMount(podDir, podIP, hostName, hostDomainName string) (*kubecontai
 
 // ensureHostsFile ensures that the given host file has an up-to-date ip, host
 // name, and domain name.
-func ensureHostsFile(fileName, hostIP, hostName, hostDomainName string) error {
+func ensureHostsFile(fileName, hostIP, hostName, hostDomainName, prefix string) error {
 	if _, err := os.Stat(fileName); os.IsExist(err) {
 		glog.V(4).Infof("kubernetes-managed etc-hosts file exits. Will not be recreated: %q", fileName)
 		return nil
@@ -902,7 +909,12 @@ func ensureHostsFile(fileName, hostIP, hostName, hostDomainName string) error {
 	buffer.WriteString("fe00::1\tip6-allnodes\n")
 	buffer.WriteString("fe00::2\tip6-allrouters\n")
 	if len(hostDomainName) > 0 {
-		buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s\n", hostIP, hostName, hostDomainName, hostName))
+		if prefix == "" {
+			buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s\n", hostIP, hostName, hostDomainName, hostName))
+		} else {
+			buffer.WriteString(fmt.Sprintf("%s\t%s.%s.%s\t%s.%s\t%s\n",
+				hostIP, prefix, hostName, hostDomainName, hostName, hostDomainName, hostName))
+		}
 	} else {
 		buffer.WriteString(fmt.Sprintf("%s\t%s\n", hostIP, hostName))
 	}
