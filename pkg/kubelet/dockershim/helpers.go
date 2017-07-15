@@ -130,21 +130,24 @@ func extractLabels(input map[string]string) (map[string]string, map[string]strin
 func generateMountBindings(mounts []*runtimeApi.Mount) (result []string) {
 	for _, m := range mounts {
 		bind := fmt.Sprintf("%s:%s", m.GetHostPath(), m.GetContainerPath())
-		readOnly := m.GetReadonly()
-		if readOnly {
-			bind += ":ro"
+		var attrs []string
+		if m.GetReadonly() {
+			attrs = append(attrs, "ro")
 		}
 		// Only request relabeling if the pod provides an SELinux context. If the pod
 		// does not provide an SELinux context relabeling will label the volume with
 		// the container's randomly allocated MCS label. This would restrict access
 		// to the volume to the container which mounts it first.
 		if m.GetSelinuxRelabel() {
-			if readOnly {
-				bind += ",Z"
-			} else {
-				bind += ":Z"
-			}
+			attrs = append(attrs, "Z")
 		}
+		if strings.Contains(m.GetHostPath(), "empty-dir") {
+			attrs = append(attrs, "rshared")
+		}
+		if len(attrs) > 0 {
+			bind = fmt.Sprintf("%s:%s", bind, strings.Join(attrs, ","))
+		}
+		glog.V(5).Infof("TSMOD create bind: %v", bind)
 		result = append(result, bind)
 	}
 	return

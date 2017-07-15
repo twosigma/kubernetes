@@ -523,17 +523,20 @@ func makeEnvList(envs []kubecontainer.EnvVar) (result []string) {
 func makeMountBindings(mounts []kubecontainer.Mount) (result []string) {
 	for _, m := range mounts {
 		bind := fmt.Sprintf("%s:%s", m.HostPath, m.ContainerPath)
+		var attrs []string
 		if m.ReadOnly {
-			bind += ":ro"
+			attrs = append(attrs, "ro")
 		}
 		if m.SELinuxRelabel && selinux.SELinuxEnabled() {
-			if m.ReadOnly {
-				bind += ",Z"
-			} else {
-				bind += ":Z"
-			}
-
+			attrs = append(attrs, "Z")
 		}
+		if strings.Contains(m.HostPath, "empty-dir") {
+			attrs = append(attrs, "rshared")
+		}
+		if len(attrs) > 0 {
+			bind = fmt.Sprintf("%s:%s", bind, strings.Join(attrs, ","))
+		}
+		glog.V(5).Infof("TSMOD adding bind: %v", bind)
 		result = append(result, bind)
 	}
 	return
