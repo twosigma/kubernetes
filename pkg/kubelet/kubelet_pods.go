@@ -1031,7 +1031,7 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	} else {
 		opts.Hostname = hostname
 	}
-	if len(opts.Hostname) > hostnameMaxLen {
+	if len(opts.Hostname) > hostnameMaxLen && !podUsesHostNetwork(pod) {
 		return nil, errors.New("Container hostname " + opts.Hostname + " is too long (63 characters limit).")
 	}
 	podName := volumehelper.GetUniquePodName(pod)
