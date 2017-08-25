@@ -573,7 +573,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 	// turns out callback may fail to happen...
 	// verify that the Pod got the service keytabs it asked for
 	// it is additional robustness if the callback from krb5_keytab did not come
-	if err := verifyAndFixKeytab(pod, services, hostName, realm, podKDCClusters, dest, user); err != nil {
+	if err := verifyAndFixKeytab(pod, services, hostName, realm, podKDCClusters, dest, user, true); err != nil {
 		glog.Errorf(krbutils.TSE+"failed to fix and verify keytab for Pod %s, error: %+v", pod.Name, err)
 		return err
 	} else {
@@ -749,7 +749,7 @@ func invokePodKeytabRefresh(pod *api.Pod, trimKeytab bool) error {
 // This function is additonal fail-safe. It will check if Pod got all of the Kerberos keytab principals it needs and will
 // invoke callback REST API if it did not. The reason for this is that sometimes the security subsystem (krb5_keytab tool)
 // fails to trigger callback.
-func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllClusters map[string]bool, podDir, userName string) error {
+func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllClusters map[string]bool, podDir, userName string, withFix bool) error {
 	defer clock.ExecTime(time.Now(), "verifyAndFixKeytab", pod.Name)
 
 	if services == "" {
@@ -811,14 +811,19 @@ func verifyAndFixKeytab(pod *api.Pod, services, hostname, realm string, podAllCl
 		glog.V(2).Infof(krbutils.TSL+"attempting to fix missing or expired (older key version) principals or trim on deletion for Pod %s", pod.Name)
 		// repair by calling our callback function in the kubelet server.go thread
 		// this assumes that the reason for failure is lack of callback from the security subsystem
-		if err := invokePodKeytabRefresh(pod, false); err != nil {
-			glog.Errorf(krbutils.TSE+"fixing keytab for Pod %s failed, err: %+v", pod.Name, err)
-			return err
+		if withFix {
+			if err := invokePodKeytabRefresh(pod, false); err != nil {
+				glog.Errorf(krbutils.TSE+"fixing keytab for Pod %s failed, err: %+v", pod.Name, err)
+				return err
+			} else {
+				glog.V(5).Infof(krbutils.TSL+"fixing keytab for Pod %s succeeded", pod.Name)
+			}
 		} else {
-			glog.V(5).Infof(krbutils.TSL+"fixing keytab for Pod %s succeeded", pod.Name)
+			// return error indicating lack of keytabs for one of the requested services
+			return errors.New("no expected keytab")
 		}
 	} else {
-		glog.V(5).Infof(krbutils.TSL+"all required principals for Pod %s were found, no need to fix", pod.Name)
+		glog.V(5).Infof(krbutils.TSL+"all required principals for Pod %s were found - no need to fix, or fixing not requested", pod.Name)
 	}
 	return nil
 }
@@ -1739,6 +1744,17 @@ func (kl *Kubelet) podUpdateKerberos(pod *api.Pod) {
 		// when services == "", only cluster membership is managed (for certs)
 		if needKeytabs || needCerts {
 			keytabFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod)
+
+			if err := verifyAndFixKeytab(pod, services, kl.hostname, realm, podAllClusters, keytabFilePath, user, false); err != nil {
+				glog.Errorf(krbutils.TSE+"failed to verify keytab for Pod %s in podUpdate handler, error: %+v", pod.Name, err)
+				// continue to the handler
+			} else {
+				// no need to proceed, all keytabs present
+				glog.V(5).Infof(krbutils.TSL+"keytab creation skipped (during Pod refresh) for clusters %+v and services %+v for POD %q",
+					podAllClusters, services, format.Pod(pod))
+				return
+			}
+
 			if err := kl.createKeytab(keytabFilePath, kl.clusterDomain, pod, services,
 				kl.hostname, realm, podAllClusters, user, false); err != nil {
 				glog.Errorf(krbutils.TSE+"error creating keytab (in refresh) for Pod %s clusters %+v services %+v, error: %v",
