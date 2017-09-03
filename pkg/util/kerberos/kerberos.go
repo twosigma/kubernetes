@@ -66,11 +66,23 @@ const (
 	// location of ktutil
 	KtutilPath = "/usr/bin/ktutil"
 
+	// location of Heimdal ktutil
+	HeimdalKtutilPath = "/opt/heimdal/bin/ktutil"
+
+	// location of kimpersonate
+	KImpersonatePath = "/root/kimpersonate"
+
+	// local cert generator
+	LocalCertGeneratorPath = "/root/generateCerts"
+
 	//host keytab file
 	HostKeytabFile = "/var/spool/keytabs/" + KeytabOwner
 
 	//host certs directory
 	HostCertsFile = "/var/spool/certs/" + CertsOwner
+
+	// host directory for self-signed certificates
+	HostSelfSignedCertsFile = "/var/spool/certs/self_signed"
 
 	// host directory with pre-stashed Kerberos tickets
 	HostPrestashedTktsDir = "/home/" + KeytabOwner + "/tickets/"
@@ -130,6 +142,7 @@ const (
 	TSRunAsUserAnnotation        = "ts/runasusername"
 	TSCertsAnnotation            = "ts/certs"
 	TSPrefixedHostnameAnnotation = "ts/userprefixedhostname"
+	TSKrbLocal                   = "ts/krblocal"
 )
 
 // Retrieve username of security context user based on userid
@@ -234,10 +247,17 @@ func RegisterClusterInKDC(clusterName, hostName string, mutex *lock.Mutex) error
 }
 
 func RunCommand(cmdToExec string, params ...string) ([]byte, error) {
+	return RunCommandWithEnv(nil, cmdToExec, params...)
+}
+
+func RunCommandWithEnv(envArray []string, cmdToExec string, params ...string) ([]byte, error) {
 	defer clock.ExecTime(time.Now(), "runCommand", cmdToExec)
 	glog.V(5).Infof(TSL+"will exec %s %+v", cmdToExec, params)
 	exe := utilexec.New()
 	cmd := exe.Command(cmdToExec, params...)
+	if envArray != nil {
+		cmd.SetEnv(envArray)
+	}
 	return cmd.CombinedOutput()
 }
 

@@ -379,6 +379,28 @@ func (kl *Kubelet) makeCertMount(podDir, clusterDomain string, pod *api.Pod, hos
 
 func createCerts(dest, clusterDomain string, pod *api.Pod, hostName, realm string, podKDCClusters map[string]bool, user string) error {
 	defer clock.ExecTime(time.Now(), "createCerts", pod.Name)
+
+	if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+		// ts/krblocal set, doing local construction of certs (self-signed)
+		glog.V(5).Infof(krbutils.TSL+"pod %s has krblocal annotation, generating local certs", pod.Name)
+		clusterName := pod.Name + "." + pod.Namespace + "." + clusterDomain
+		// request the local certs (for domain not registered in KDC)
+		out, err := krbutils.RunCommand(krbutils.LocalCertGeneratorPath, clusterName, krbutils.HostSelfSignedCertsFile)
+		if err != nil {
+			glog.Errorf(krbutils.TSE+"error creating local certs for cluster %s, error: %v, output: %v", clusterName, err, string(out))
+			return err
+		} else {
+			// copy certs to the Pod's directory
+			if err := copyCertsToPod(krbutils.HostSelfSignedCertsFile, dest, clusterName, user, false); err != nil {
+				glog.Errorf(krbutils.TSE+"unable to copy certs in directory %s to %s: %s %v", krbutils.HostSelfSignedCertsFile,
+					dest, err)
+			} else {
+				glog.V(5).Infof(krbutils.TSL+"all local certs for Pod %s created", pod.Name)
+				return nil
+			}
+		}
+	}
+
 	// refresh the actual certs file on the node
 	for clusterName, _ := range podKDCClusters {
 		// request creation of the certificate
@@ -433,6 +455,33 @@ func refreshCerts(clusterName, certsDir, user string) error {
 			clusterName, string(out))
 	}
 
+	// copy certs to the Pod's directory
+	if err := copyCertsToPod(krbutils.HostCertsFile, certsDir, clusterName, user, false); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to copy certs in directory %s to %s: %s %v", krbutils.HostCertsFile, certsDir, err)
+		return err
+	} else {
+		glog.V(5).Infof(krbutils.TSL+"all cert files have been copied to Pod's directory %s for cluster %s", certsDir, clusterName)
+		return nil
+	}
+}
+
+func removeOriginalCerts(hostDir, clusterName string) {
+	// create the Pod directory
+	exe := utilexec.New()
+	cmd := exe.Command(
+		"rm",
+		"-f",
+		hostDir+"/"+clusterName+"*")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to remove certs in directory %s: %s %v", hostDir, out, err)
+	}
+}
+
+func copyCertsToPod(hostDir, certsDir, clusterName, user string, removeOriginal bool) error {
+	if removeOriginal {
+		defer removeOriginalCerts(hostDir, clusterName)
+	}
+
 	// create the Pod directory
 	exe := utilexec.New()
 	cmd := exe.Command(
@@ -444,7 +493,7 @@ func refreshCerts(clusterName, certsDir, user string) error {
 	}
 
 	// copy the files to the Pod certs directory
-	if certFiles, err := filepath.Glob(krbutils.HostCertsFile + "/" + clusterName + "*"); err != nil {
+	if certFiles, err := filepath.Glob(hostDir + "/" + clusterName + "*"); err != nil {
 		glog.Errorf(krbutils.TSE+"error listing cert files for cluster %s, error: %v", clusterName, err)
 		return err
 	} else {
@@ -455,7 +504,8 @@ func refreshCerts(clusterName, certsDir, user string) error {
 					certFile, clusterName, certsDir, err, string(out))
 				return err
 			} else {
-				glog.V(5).Infof(krbutils.TSL+"cert file %s have been copied to Pod's directory %s for cluster %s", certFile, certsDir, clusterName)
+				glog.V(5).Infof(krbutils.TSL+"cert file %s have been copied to Pod's directory %s for cluster %s", certFile,
+					certsDir, clusterName)
 			}
 			certFileInPod := certsDir + "/" + filepath.Base(certFile)
 			err1 := os.Chmod(certFileInPod, 0600)
@@ -471,9 +521,8 @@ func refreshCerts(clusterName, certsDir, user string) error {
 				return err1
 			}
 		}
+		return nil
 	}
-	glog.V(5).Infof(krbutils.TSL+"all cert files have been copied to Pod's directory %s for cluster %s", certsDir, clusterName)
-	return nil
 }
 
 func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
@@ -504,10 +553,68 @@ func (kl *Kubelet) makeKeytabMount(podDir, clusterDomain string, pod *api.Pod, s
 	}, nil
 }
 
+func changeFileOwnership(podKeytabFile, user string, pod *api.Pod) error {
+	err := os.Chmod(podKeytabFile, 0600)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"error changing keytab file %s permission to 0600 for pod %s, error: %v", podKeytabFile, pod.Name, err)
+		return err
+	}
+	owner := user + ":" + krbutils.TicketUserGroup
+	exe := utilexec.New()
+	cmd := exe.Command(krbutils.ChownPath, owner, podKeytabFile)
+	if _, err = cmd.CombinedOutput(); err != nil {
+		glog.Errorf(krbutils.TSE+"error changing owner to %v, error: %v", owner, err)
+		return err
+	}
+	return nil
+}
+
 func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, services string, hostName, realm string, podKDCClusters map[string]bool, user string, force bool) error {
 	defer clock.ExecTime(time.Now(), "createKeytab", pod.Name)
 	var err error
+	var out []byte
 	var mutex *lock.Mutex = nil
+
+	if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+		// ts/krblocal set, doing local construction of keytab with "light" KDC interaction
+		glog.V(5).Infof(krbutils.TSL+"pod %s has krblocal annotation, generating local keytab", pod.Name)
+		clusterName := pod.Name + "." + pod.Namespace + "." + clusterDomain
+		for _, srv := range strings.Split(services, ",") {
+			// request the local keytab (for domain not registered
+			// create keytab directory
+			podKeytabFile := dest + "/" + user
+			if err := os.MkdirAll(dest, 0755); err != nil {
+				glog.Errorf("Error creating keytab directory %q for pod %s: %v", dest, err, pod.Name)
+				return err
+			}
+			out, err = krbutils.RunCommand(krbutils.HeimdalKtutilPath, "-k", podKeytabFile, "add", "-re",
+				"aes128-stc", "-V", "2", "-p", srv+"/"+clusterName)
+			if err != nil {
+				glog.Errorf(krbutils.TSE+"error creating local keytab for service %s in cluster %s during, error: %v, output: %v",
+					srv, clusterName, err, string(out))
+				return err
+			} else {
+				if err = changeFileOwnership(podKeytabFile, user, pod); err != nil {
+					return err
+				}
+				// add service ticket related to the keytab to the credentials cache of the Pod
+				tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
+				out, err = krbutils.RunCommandWithEnv([]string{"KRB5_CCNAME=" + tktFilePath}, krbutils.KImpersonatePath, "-A", "-c",
+					user+"@"+realm, "-s", srv+"/"+clusterName+"@", "-t", "aes128-stc", "-k", dest)
+				if err != nil {
+					glog.Errorf(krbutils.TSE+"error creating ticket for local keytab for %s/%s and %s@%s, error: %v, output: %v",
+						srv, clusterName, user, realm, err, string(out))
+					return err
+				}
+				glog.V(5).Infof(krbutils.TSL+"local keytabfile and ticket created for %s/%s, returned output %s with no error",
+					srv, clusterName, string(out))
+			}
+		}
+		glog.V(5).Infof(krbutils.TSL+"all local keytabs and tickets for  Pod %s created", pod.Name)
+		return nil
+	}
+
+	// it is a "regular" Pod - i.e., without krblocal annotation - will have full KDC registration
 
 	// retrieve keys and versions from the host keytab file
 	hostKeyVersions, _, _, err := getKeyVersionsFromKeytab(krbutils.HostKeytabFile)
@@ -1570,6 +1677,10 @@ func (kl *Kubelet) podKerberosManager() {
 		case podUpdateMessage, ok := <-kl.podKerberosCh:
 			if ok {
 				apiPod := podUpdateMessage.APIPod
+				// do not do anything with Pods with cached Kerberos
+				if krbLocal, ok := apiPod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+					continue
+				}
 				// check what type of request it is and ignore if already on-going
 				if apiPod.DeletionTimestamp != nil {
 					if inProgressDelete.Has(string(apiPod.ObjectMeta.UID)) {

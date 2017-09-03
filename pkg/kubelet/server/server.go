@@ -601,6 +601,10 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 		for _, pod := range pods {
 			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
+					// do not distribute keytabs to Pods that use local keytabs (since they do not come from host keytab file)
+					if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+						continue
+					}
 					if pod.Spec.SecurityContext.RunAsUser != nil {
 						// skip the Pods being deleted
 						if pod.DeletionTimestamp != nil {
