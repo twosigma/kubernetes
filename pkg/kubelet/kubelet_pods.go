@@ -588,7 +588,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 				return err
 			}
 			out, err = krbutils.RunCommand(krbutils.HeimdalKtutilPath, "-k", podKeytabFile, "add", "-re",
-				"aes128-stc", "-V", "2", "-p", srv+"/"+clusterName)
+				"aes128-cts", "-V", "2", "-p", srv+"/"+clusterName)
 			if err != nil {
 				glog.Errorf(krbutils.TSE+"error creating local keytab for service %s in cluster %s during, error: %v, output: %v",
 					srv, clusterName, err, string(out))
