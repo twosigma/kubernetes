@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1306,6 +1307,37 @@ func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 			if err := decodeTicket(tmpFile, tkt, user, krbutils.TicketUserGroup); err != nil {
 				glog.Errorf(krbutils.TSE+"unable to decode and refresh the ticket: %v", err)
 			} else {
+				// for Pods with local keytabs we also need to refresh the kimpersonator generated ticket
+				// (which is in the same credentials cache as the main tgt ticket)
+				if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+					// ts/krblocal set, doing local construction of keytab with "light" KDC interaction
+					glog.V(5).Infof(krbutils.TSL+"pod %s has krblocal annotation, refreshing tickets for local keytabs", pod.Name)
+					realm := krbutils.KerberosRealm
+					podKeytabFile := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod) + "/" + user
+					if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok && services != "" {
+						for _, srv := range strings.Split(services, ",") {
+							clusterName := pod.Name + "." + pod.Namespace + "." + kl.clusterDomain
+							podLocalPrincipals := []string{srv + "/" + clusterName}
+							if tsuserprefixed, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok &&
+								tsuserprefixed == "true" {
+								podLocalPrincipals = append(podLocalPrincipals, srv+"/"+user+"."+clusterName)
+							}
+							for _, principal := range podLocalPrincipals {
+								tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
+								out, err := krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tktFilePath},
+									krbutils.KImpersonatePath, "-A", "-c",
+									user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec), "-s", principal+"@", "-t",
+									"aes128-cts", "-k", podKeytabFile)
+								if err != nil {
+									glog.Errorf(krbutils.TSE+
+										"error refreshing ticket for local keytab %s and %s@%s, error: %v, out: %v",
+										principal, user, realm, err, string(out))
+								}
+							}
+						}
+					}
+					glog.V(5).Infof(krbutils.TSL+"all local tickets refreshed for pod %s", pod.Name)
+				}
 				exe := utilexec.New()
 				cmd := exe.Command(
 					"/bin/cp",

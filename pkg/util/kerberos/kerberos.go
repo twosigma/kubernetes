@@ -75,6 +75,10 @@ const (
 	// local cert generator
 	LocalCertGeneratorPath = "/root/generateCerts"
 
+	// number of seconds that kimpersonate tickets expire after
+	// set to 3 days
+	LocalTicketExpirationSec = 72 * 3600
+
 	//host keytab file
 	HostKeytabFile = "/var/spool/keytabs/" + KeytabOwner
 

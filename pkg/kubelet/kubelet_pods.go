@@ -385,20 +385,28 @@ func createCerts(dest, clusterDomain string, pod *api.Pod, hostName, realm strin
 		glog.V(5).Infof(krbutils.TSL+"pod %s has krblocal annotation, generating local certs", pod.Name)
 		clusterName := pod.Name + "." + pod.Namespace + "." + clusterDomain
 		// request the local certs (for domain not registered in KDC)
-		out, err := krbutils.RunCommand(krbutils.LocalCertGeneratorPath, clusterName, krbutils.HostSelfSignedCertsFile)
-		if err != nil {
-			glog.Errorf(krbutils.TSE+"error creating local certs for cluster %s, error: %v, output: %v", clusterName, err, string(out))
-			return err
-		} else {
-			// copy certs to the Pod's directory
-			if err := copyCertsToPod(krbutils.HostSelfSignedCertsFile, dest, clusterName, user, false); err != nil {
-				glog.Errorf(krbutils.TSE+"unable to copy certs in directory %s to %s: %s %v", krbutils.HostSelfSignedCertsFile,
-					dest, err)
+		podLocalClusters := []string{clusterName}
+		if tsuserprefixed, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok && tsuserprefixed == "true" {
+			podLocalClusters = append(podLocalClusters, user+"."+clusterName)
+		}
+		for _, localCluster := range podLocalClusters {
+			out, err := krbutils.RunCommand(krbutils.LocalCertGeneratorPath, localCluster, krbutils.HostSelfSignedCertsFile)
+			if err != nil {
+				glog.Errorf(krbutils.TSE+"error creating local certs for cluster %s, error: %v, output: %v", localCluster, err, string(out))
+				return err
 			} else {
-				glog.V(5).Infof(krbutils.TSL+"all local certs for Pod %s created", pod.Name)
-				return nil
+				// copy certs to the Pod's directory
+				if err := copyCertsToPod(krbutils.HostSelfSignedCertsFile, dest, localCluster, user, false); err != nil {
+					glog.Errorf(krbutils.TSE+"unable to copy certs in directory %s to %s: %s %v", krbutils.HostSelfSignedCertsFile,
+						dest, err)
+					return err
+				} else {
+					glog.V(5).Infof(krbutils.TSL+"cert for cluster %s in Pod %s created", localCluster, pod.Name)
+				}
 			}
 		}
+		glog.V(5).Infof(krbutils.TSL+"all local certs for Pod %s created", pod.Name)
+		return nil
 	}
 
 	// refresh the actual certs file on the node
@@ -587,30 +595,37 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 				glog.Errorf("Error creating keytab directory %q for pod %s: %v", dest, err, pod.Name)
 				return err
 			}
-			out, err = krbutils.RunCommand(krbutils.HeimdalKtutilPath, "-k", podKeytabFile, "add", "-re",
-				"aes128-cts", "-V", "2", "-p", srv+"/"+clusterName)
-			if err != nil {
-				glog.Errorf(krbutils.TSE+"error creating local keytab for service %s in cluster %s during, error: %v, output: %v",
-					srv, clusterName, err, string(out))
-				return err
-			} else {
-				if err = changeFileOwnership(podKeytabFile, user, pod); err != nil {
-					return err
-				}
-				// add service ticket related to the keytab to the credentials cache of the Pod
-				tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
-				out, err = krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tktFilePath}, krbutils.KImpersonatePath, "-A", "-c",
-					user+"@"+realm, "-s", srv+"/"+clusterName+"@", "-t", "aes128-cts", "-k", podKeytabFile)
+			podLocalPrincipals := []string{srv + "/" + clusterName}
+			if tsuserprefixed, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok && tsuserprefixed == "true" {
+				podLocalPrincipals = append(podLocalPrincipals, srv+"/"+user+"."+clusterName)
+			}
+			for _, principal := range podLocalPrincipals {
+				out, err = krbutils.RunCommand(krbutils.HeimdalKtutilPath, "-k", podKeytabFile, "add", "-re",
+					"aes128-cts", "-V", "2", "-p", principal)
 				if err != nil {
-					glog.Errorf(krbutils.TSE+"error creating ticket for local keytab for %s/%s and %s@%s, error: %v, output: %v",
-						srv, clusterName, user, realm, err, string(out))
+					glog.Errorf(krbutils.TSE+"error creating local keytab for principal %s during, error: %v, output: %v",
+						principal, err, string(out))
 					return err
+				} else {
+					if err = changeFileOwnership(podKeytabFile, user, pod); err != nil {
+						return err
+					}
+					// add service ticket related to the keytab to the credentials cache of the Pod
+					tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
+					out, err = krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tktFilePath}, krbutils.KImpersonatePath, "-A", "-c",
+						user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec), "-s",
+						principal+"@", "-t", "aes128-cts", "-k", podKeytabFile)
+					if err != nil {
+						glog.Errorf(krbutils.TSE+"error creating ticket for local keytab for %s and %s@%s, error: %v, output: %v",
+							principal, user, realm, err, string(out))
+						return err
+					}
+					glog.V(5).Infof(krbutils.TSL+"local keytabfile and ticket created for %s, returned output %s with no error",
+						principal, string(out))
 				}
-				glog.V(5).Infof(krbutils.TSL+"local keytabfile and ticket created for %s/%s, returned output %s with no error",
-					srv, clusterName, string(out))
 			}
 		}
-		glog.V(5).Infof(krbutils.TSL+"all local keytabs and tickets for  Pod %s created", pod.Name)
+		glog.V(5).Infof(krbutils.TSL+"all local keytabs and tickets for Pod %s created", pod.Name)
 		return nil
 	}
 
