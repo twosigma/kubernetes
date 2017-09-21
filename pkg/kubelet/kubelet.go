@@ -1323,8 +1323,7 @@ func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 								podLocalPrincipals = append(podLocalPrincipals, srv+"/"+user+"."+clusterName)
 							}
 							for _, principal := range podLocalPrincipals {
-								tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
-								out, err := krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tktFilePath},
+								out, err := krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tmpFile},
 									krbutils.KImpersonatePath, "-A", "-c",
 									user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec), "-s", principal+"@", "-t",
 									"aes128-cts", "-k", podKeytabFile)
