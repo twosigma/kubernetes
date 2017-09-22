@@ -164,7 +164,13 @@ func makeMounts(pod *api.Pod, podDir string, container *api.Container, hostName,
 				prefix = runAsUsername
 			}
 		}
-		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain, prefix)
+		var doReverseHostsOrder bool
+		if reverseHostsOrder, ok := pod.ObjectMeta.Annotations[krbutils.TSReverseHostsOrder]; ok && reverseHostsOrder == "true" {
+			doReverseHostsOrder = true
+		} else {
+			doReverseHostsOrder = false
+		}
+		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain, prefix, doReverseHostsOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -1006,9 +1012,9 @@ func decodeTicket(dest, data, user, group string) error {
 
 // makeHostsMount makes the mountpoint for the hosts file that the containers
 // in a pod are injected with.
-func makeHostsMount(podDir, podIP, hostName, hostDomainName, prefix string) (*kubecontainer.Mount, error) {
+func makeHostsMount(podDir, podIP, hostName, hostDomainName, prefix string, doReverseHostsOrder bool) (*kubecontainer.Mount, error) {
 	hostsFilePath := path.Join(podDir, "etc-hosts")
-	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName, prefix); err != nil {
+	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName, prefix, doReverseHostsOrder); err != nil {
 		return nil, err
 	}
 	return &kubecontainer.Mount{
@@ -1022,7 +1028,7 @@ func makeHostsMount(podDir, podIP, hostName, hostDomainName, prefix string) (*ku
 
 // ensureHostsFile ensures that the given host file has an up-to-date ip, host
 // name, and domain name.
-func ensureHostsFile(fileName, hostIP, hostName, hostDomainName, prefix string) error {
+func ensureHostsFile(fileName, hostIP, hostName, hostDomainName, prefix string, doReverseHostsOrder bool) error {
 	if _, err := os.Stat(fileName); os.IsExist(err) {
 		glog.V(4).Infof("kubernetes-managed etc-hosts file exits. Will not be recreated: %q", fileName)
 		return nil
@@ -1039,8 +1045,13 @@ func ensureHostsFile(fileName, hostIP, hostName, hostDomainName, prefix string) 
 		if prefix == "" {
 			buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s\n", hostIP, hostName, hostDomainName, hostName))
 		} else {
-			buffer.WriteString(fmt.Sprintf("%s\t%s.%s.%s\t%s.%s\t%s\n",
-				hostIP, prefix, hostName, hostDomainName, hostName, hostDomainName, hostName))
+			if doReverseHostsOrder {
+				buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s.%s.%s\t%s\n",
+					hostIP, hostName, hostDomainName, prefix, hostName, hostDomainName, hostName))
+			} else {
+				buffer.WriteString(fmt.Sprintf("%s\t%s.%s.%s\t%s.%s\t%s\n",
+					hostIP, prefix, hostName, hostDomainName, hostName, hostDomainName, hostName))
+			}
 		}
 	} else {
 		buffer.WriteString(fmt.Sprintf("%s\t%s\n", hostIP, hostName))

@@ -147,6 +147,7 @@ const (
 	TSCertsAnnotation            = "ts/certs"
 	TSPrefixedHostnameAnnotation = "ts/userprefixedhostname"
 	TSKrbLocal                   = "ts/krblocal"
+	TSReverseHostsOrder          = "ts/reversehostsorder"
 )
 
 // Retrieve username of security context user based on userid
