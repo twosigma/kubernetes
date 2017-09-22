@@ -1325,7 +1325,8 @@ func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
 							for _, principal := range podLocalPrincipals {
 								out, err := krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tmpFile},
 									krbutils.KImpersonatePath, "-A", "-c",
-									user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec), "-s", principal+"@", "-t",
+									user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec),
+									"-s", principal+"@"+realm, "-t",
 									"aes128-cts", "-k", podKeytabFile)
 								if err != nil {
 									glog.Errorf(krbutils.TSE+

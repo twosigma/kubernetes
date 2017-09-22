@@ -620,7 +620,7 @@ func (kl *Kubelet) createKeytab(dest, clusterDomain string, pod *api.Pod, servic
 					tktFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.TicketDirForPod)
 					out, err = krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tktFilePath}, krbutils.KImpersonatePath, "-A", "-c",
 						user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec), "-s",
-						principal+"@", "-t", "aes128-cts", "-k", podKeytabFile)
+						principal+"@"+realm, "-t", "aes128-cts", "-k", podKeytabFile)
 					if err != nil {
 						glog.Errorf(krbutils.TSE+"error creating ticket for local keytab for %s and %s@%s, error: %v, output: %v",
 							principal, user, realm, err, string(out))
