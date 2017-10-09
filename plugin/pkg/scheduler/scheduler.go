@@ -17,16 +17,11 @@ limitations under the License.
 package scheduler
 
 import (
-	"fmt"
-	"io"
-	"io/ioutil"
-	"os"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/record"
-	"k8s.io/kubernetes/pkg/util/exec"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/metrics"
@@ -48,6 +43,8 @@ type PodConditionUpdater interface {
 // nodes that they fit on and writes bindings back to the api server.
 type Scheduler struct {
 	config *Config
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 type Config struct {
@@ -85,6 +82,10 @@ func New(c *Config) *Scheduler {
 		config: c,
 	}
 	metrics.Register()
+	// create an instance of Kerberos manager
+	s.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
 	return s
 }
 
@@ -119,73 +120,13 @@ func (s *Scheduler) scheduleOne() {
 	assumed := *pod
 	assumed.Spec.NodeName = dest
 
-	tokenFile := ""
-	// go with a simple hard coded version as poc
-	if token, ok := assumed.ObjectMeta.Annotations[krbutils.TSTokenAnnotation]; ok {
-		// first we check if "ts/token" is present, if so we decode the token and re-encrypt
-		glog.Infof(krbutils.TSL+"got %s=%s", krbutils.TSTokenAnnotation, token)
-
-		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
-		if err != nil {
-			glog.Errorf(krbutils.TSE+"failed to create tmp file: %v", err)
-		} else {
-			tmpFile := file.Name()
-			defer os.Remove(tmpFile)
-			env := "KRB5_KTNAME=" + krbutils.HostKeytabFile
-			exe := exec.New()
-			cmd := exe.Command(
-				krbutils.GsstokenPath,
-				"-r",
-				"-C",
-				tmpFile)
-			cmd.SetEnv([]string{env})
-			stdin, err := cmd.StdinPipe()
-			if err != nil {
-				glog.Errorf(krbutils.TSE+"unable to obtain stdin of child process: %v", err)
-			} else {
-				io.WriteString(stdin, token+"\n")
-				stdin.Close()
-				out, err := cmd.CombinedOutput()
-				if err == nil {
-					tokenFile = tmpFile
-					glog.Infof(krbutils.TSL+"token decrypt successfully to %s", tmpFile)
-				} else {
-					glog.Errorf(krbutils.TSE+"unable to decode token: %s", out)
-				}
-			}
-		}
-	} else if user, ok := assumed.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
-		if assumed.ObjectMeta.Annotations[krbutils.TSPrestashTkt] == "true" {
-			// second we check if "ts/user" is present, if so we use prestashed ticket and encrypt
-			realm := krbutils.KerberosRealm
-			// user/realm are specified, we should encrypt tickets and stick it inside
-			glog.Infof(krbutils.TSL+"got %s=%s, KerberosRealm=%s, trying to create token from prestashed ticket",
-				krbutils.TSRunAsUserAnnotation, user, realm)
-			tktPath := fmt.Sprintf(krbutils.HostPrestashedTktsDir+"@%s/%s", realm, user)
-			if _, err := os.Stat(tktPath); os.IsNotExist(err) {
-				glog.Errorf(krbutils.TSE+"prestashed ticket for %s@%s does not exist", user, realm)
-			} else {
-				tokenFile = tktPath
-			}
-		}
-	}
-
-	if tokenFile != "" {
-		env := fmt.Sprintf("KRB5CCNAME=%s", tokenFile)
-		exe := exec.New()
-		cmd := exe.Command(
-			krbutils.GsstokenPath,
-			"-D",
-			fmt.Sprintf("%s@%s", krbutils.KeytabOwner, dest))
-		cmd.SetEnv([]string{env})
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			glog.V(5).Infof(krbutils.TSL+"token created: %s", out)
-			assumed.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = string(out)
-		} else {
-			glog.Errorf(krbutils.TSE+"token generation failed: %v; output: %v; dest=%v; env=%v",
-				err, string(out), dest, env)
-		}
+	// Kerberos object life-cycle management extension
+	// check if the pod requested a Kerberos ticket and, if so, encrypt it with the
+	// destinations host public key and store in pod's manifest annotation
+	if errTicket := s.krbManager.PrepareEncryptedTicket(&assumed, dest); errTicket != nil {
+		glog.Errorf(krbutils.TSE+"ticket encoding failed: %v", err)
+	} else {
+		glog.V(4).Infof(krbutils.TSL+"ticket destined to %s has been encoded for pod %s/%s", dest, assumed.Namespace, assumed.Name)
 	}
 
 	if err := s.config.SchedulerCache.AssumePod(&assumed); err != nil {

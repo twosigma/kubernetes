@@ -344,8 +344,7 @@ func StartControllers(s *options.CMServer, kubeconfig *restclient.Config, rootCl
 	go resourcequotacontroller.NewResourceQuotaController(resourceQuotaControllerOptions).Run(int(s.ConcurrentResourceQuotaSyncs), wait.NeverStop)
 	time.Sleep(wait.Jitter(s.ControllerStartInterval.Duration, ControllerStartJitter))
 
-	// TS security credentials controller manages Kerberos tickets refresh in existing PODs
-	// TODO: add management of Kerberos certificates and keytabs
+	// TS security credentials controller manages Kerberos tickets refresh in existing pods
 	tssecurityController, err := securitycontroller.NewSecurityCredentialsController(
 		clientset.NewForConfigOrDie(restclient.AddUserAgent(kubeconfig, "tssecurity-controller")))
 	if err != nil {

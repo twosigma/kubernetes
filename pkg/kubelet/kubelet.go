@@ -18,7 +18,6 @@ package kubelet
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -26,7 +25,6 @@ import (
 	"os"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +41,7 @@ import (
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/fields"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	internalApi "k8s.io/kubernetes/pkg/kubelet/api"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
@@ -86,7 +85,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/integer"
 	kubeio "k8s.io/kubernetes/pkg/util/io"
 	utilipt "k8s.io/kubernetes/pkg/util/iptables"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/mount"
 	nodeutil "k8s.io/kubernetes/pkg/util/node"
 	"k8s.io/kubernetes/pkg/util/oom"
@@ -811,6 +809,20 @@ func NewMainKubelet(kubeCfg *componentconfig.KubeletConfiguration, kubeDeps *Kub
 	// Finally, put the most recent version of the config on the Kubelet, so
 	// people can see how it was configured.
 	klet.kubeletConfiguration = *kubeCfg
+
+	// create Kerberos manager instance
+	klet.krbManager, err = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{
+			TSLockEtcdServerList: klet.kubeletConfiguration.TSLockEtcdServerList,
+			TSLockEtcdCertFile:   klet.kubeletConfiguration.TSLockEtcdCertFile,
+			TSLockEtcdKeyFile:    klet.kubeletConfiguration.TSLockEtcdKeyFile,
+			TSLockEtcdCAFile:     klet.kubeletConfiguration.TSLockEtcdCAFile,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return klet, nil
 }
 
@@ -1119,6 +1131,8 @@ type Kubelet struct {
 
 	// channel for Kerberos management
 	podKerberosCh chan *PodUpdateKerberosMessage
+
+	krbManager krbutils.KrbManager
 }
 
 // setupDataDirs creates:
@@ -1291,117 +1305,6 @@ func (kl *Kubelet) GetClusterDomain() string {
 	return kl.clusterDomain
 }
 
-// Refresh the TS Kerberos ticket by decoding it using host's key
-// and updating the content of the ticket file mounted into the container.
-// We decode the ticket into a tempfile (instead of directly to the mounted file)
-// to preserve the inode (so the container does not need to be restarted).
-func (kl *Kubelet) refreshTSTkt(pod *api.Pod, user, tkt string) {
-	tktFilePath := path.Join(kl.getPodDir(pod.UID), "tkt")
-	if _, err := os.Stat(tktFilePath); err == nil {
-		file, err := ioutil.TempFile(os.TempDir(), "k8s-token")
-		if err != nil {
-			glog.Errorf(krbutils.TSE+"failed to create temp file: %v", err)
-		} else {
-			tmpFile := file.Name()
-			defer os.Remove(tmpFile)
-			if err := decodeTicket(tmpFile, tkt, user, krbutils.TicketUserGroup); err != nil {
-				glog.Errorf(krbutils.TSE+"unable to decode and refresh the ticket: %v", err)
-			} else {
-				// for Pods with local keytabs we also need to refresh the kimpersonator generated ticket
-				// (which is in the same credentials cache as the main tgt ticket)
-				if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
-					// ts/krblocal set, doing local construction of keytab with "light" KDC interaction
-					glog.V(5).Infof(krbutils.TSL+"pod %s has krblocal annotation, refreshing tickets for local keytabs", pod.Name)
-					realm := krbutils.KerberosRealm
-					podKeytabFile := path.Join(kl.getPodDir(pod.UID), krbutils.KeytabDirForPod) + "/" + user
-					if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok && services != "" {
-						for _, srv := range strings.Split(services, ",") {
-							clusterName := pod.Name + "." + pod.Namespace + "." + kl.clusterDomain
-							podLocalPrincipals := []string{srv + "/" + clusterName}
-							if tsuserprefixed, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok &&
-								tsuserprefixed == "true" {
-								podLocalPrincipals = append(podLocalPrincipals, srv+"/"+user+"."+clusterName)
-							}
-							for _, principal := range podLocalPrincipals {
-								out, err := krbutils.RunCommandWithEnv([]string{"KRB5CCNAME=" + tmpFile},
-									krbutils.KImpersonatePath, "-A", "-c",
-									user+"@"+realm, "-e", strconv.Itoa(krbutils.LocalTicketExpirationSec),
-									"-s", principal+"@"+realm, "-t",
-									"aes128-cts", "-k", podKeytabFile)
-								if err != nil {
-									glog.Errorf(krbutils.TSE+
-										"error refreshing ticket for local keytab %s and %s@%s, error: %v, out: %v",
-										principal, user, realm, err, string(out))
-								}
-							}
-						}
-					}
-					glog.V(5).Infof(krbutils.TSL+"all local tickets refreshed for pod %s", pod.Name)
-				}
-				exe := utilexec.New()
-				cmd := exe.Command(
-					"/bin/cp",
-					"-f",
-					tmpFile,
-					tktFilePath)
-				if out, err := cmd.CombinedOutput(); err != nil {
-					glog.Errorf(krbutils.TSE+"unable to copy the refreshed ticket: %s %v", out, err)
-				} else {
-					glog.V(2).Infof(krbutils.TSL+"ticket has been refreshed at %s %s", tktFilePath, out)
-				}
-			}
-		}
-	} else if os.IsNotExist(err) {
-		glog.Errorf(krbutils.TSE+"ticket file does not exist at %s", tktFilePath)
-	} else {
-		glog.Errorf(krbutils.TSE+"unable to check if the TS ticket file exists: %v", err)
-	}
-}
-
-// Build a list of service-level clusters that the Pod is a member of. This is done
-// by checking which services have selectors matching labels on the Pod.
-func (kl *Kubelet) GetPodServiceClusters(pod *api.Pod) (map[string]bool, error) {
-	podLabels := pod.Labels
-	if services, err := kl.serviceLister.List(labels.Everything()); err != nil {
-		glog.Errorf(krbutils.TSE+"error listing Pod's services for keytab creation for Pod %s: %v", pod.Name, err)
-		return nil, err
-	} else {
-		// services is of type api.ServiceList
-		// filter for services selecting this POD
-		// TODO: Check if there is a simpler way of finding services selecting a Pod.
-		serviceClusters := make(map[string]bool)
-		for i := range services {
-			service := services[i]
-			serviceCluster := service.Name + "." + service.Namespace + ".svc." + kl.clusterDomain
-			isMember := false
-			for selKey, selVal := range service.Spec.Selector {
-				if labelVal := podLabels[selKey]; labelVal == selVal {
-					isMember = true
-					break
-				}
-			}
-
-			// TODO: need to handle manually defined endpoints (for services with no selectors)
-			// serviceEndpoints, err := xx?.GetServiceEndpoints(service)
-			if isMember {
-				serviceClusters[serviceCluster] = true
-			}
-		}
-		glog.V(5).Infof(krbutils.TSL+"services selecting Pod %s are %v", pod.Name, serviceClusters)
-		return serviceClusters, nil
-	}
-}
-
-func Filter(vs []string, f func(string) bool) []string {
-	vsf := make([]string, 0)
-	for _, v := range vs {
-		if f(v) {
-			vsf = append(vsf, v)
-		}
-	}
-	return vsf
-}
-
 // GetClusterDNS returns a list of the DNS servers and a list of the DNS search
 // domains of the cluster.
 func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
@@ -1416,7 +1319,7 @@ func (kl *Kubelet) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
 
 		hostDNS, hostSearch, err = kl.parseResolvConf(f)
 		// TS mod, ignore link local dns resolvers to skip unbound
-		hostDNS = Filter(hostDNS, func(v string) bool {
+		hostDNS = krbutils.Filter(hostDNS, func(v string) bool {
 			return !strings.HasPrefix(v, "127.")
 		})
 		if err != nil {
@@ -2120,7 +2023,8 @@ func (kl *Kubelet) HandlePodUpdates(pods []*api.Pod) {
 			} else {
 				// check if the updated Pod has an encoded ticket (ts/ticket annotation) and, if it does, trigger refresh
 				if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {
-					kl.refreshTSTkt(pod, user, tkt)
+					// ignore error here, since can not do much besides looging (inside the function)
+					_ = kl.refreshTSTkt(pod, user, tkt)
 				}
 			}
 		}

@@ -51,6 +51,7 @@ import (
 	"k8s.io/kubernetes/pkg/auth/authorizer"
 	"k8s.io/kubernetes/pkg/healthz"
 	"k8s.io/kubernetes/pkg/httplog"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/server/portforward"
@@ -63,7 +64,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/configz"
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/flushwriter"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/limitwriter"
 	"k8s.io/kubernetes/pkg/util/term"
 	"k8s.io/kubernetes/pkg/volume"
@@ -83,6 +83,8 @@ type Server struct {
 	restfulCont      containerInterface
 	resourceAnalyzer stats.ResourceAnalyzer
 	runtime          kubecontainer.Runtime
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 type TLSOptions struct {
@@ -222,6 +224,12 @@ func NewServer(
 	if enableDebuggingHandlers {
 		server.InstallDebuggingHandlers(criHandler)
 	}
+	// create Kerberos manager instance
+	// no locking in server manager, so no lock config passed
+	server.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
+
 	return server
 }
 
@@ -597,7 +605,7 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 
 		pods := s.host.GetPods()
 		allNeededPrincipals := map[string]bool{}
-		realm := krbutils.KerberosRealm
+		realm := s.krbManager.GetKerberosRealm()
 		for _, pod := range pods {
 			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
@@ -636,7 +644,7 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 				glog.Errorf(krbutils.TSE+"could not retrieve hostname of the node, error: %+v", err)
 			} else {
 				// in addition, we need to protect user's keytab from being trimmed
-				allNeededPrincipals[krbutils.KeytabOwner+"/"+nodeHostname+"@"+krbutils.KerberosRealm] = true
+				allNeededPrincipals[s.krbManager.GetKeytabOwner()+"/"+nodeHostname+"@"+s.krbManager.GetKerberosRealm()] = true
 				glog.V(4).Infof(krbutils.TSL+"trimming will preserve principals: %+v", allNeededPrincipals)
 				if err := trimKeytabFile(keytabFile, allNeededPrincipals); err != nil {
 					glog.Errorf(krbutils.TSE+"error trimming the keytab file %+v", err)
@@ -746,7 +754,7 @@ func (s *Server) refreshKeytab(keytabFile string, pod *api.Pod, userName, servic
 		glog.V(4).Infof(krbutils.TSL + "runAsUser not set, skipping keytab ownership change")
 		return principals, nil
 	}
-	owner := strconv.Itoa(int(*runAsUser)) + ":" + krbutils.TicketUserGroup
+	owner := strconv.Itoa(int(*runAsUser)) + ":" + s.krbManager.GetTicketUserGroup()
 	glog.V(4).Infof(krbutils.TSL+"keytab file %s ownership will be changed to runAsUser %s", podKeytabFile, owner)
 	err = os.Chmod(podKeytabFile, 0600)
 	if err != nil {

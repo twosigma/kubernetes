@@ -45,6 +45,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/client/record"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
@@ -64,7 +65,6 @@ import (
 	kubetypes "k8s.io/kubernetes/pkg/types"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/flowcontrol"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/oom"
 	"k8s.io/kubernetes/pkg/util/procfs"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
@@ -1798,7 +1798,7 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 			if err != nil {
 				glog.V(5).Infof(krbutils.TSE+"error mkdir %v: %v", cgroupPath, out)
 			}
-			out, err = exe.Command("chown", "-R", tsUser+":"+krbutils.KeytabOwner, cgroupPath).CombinedOutput()
+			out, err = exe.Command("chown", "-R", tsUser+":"+krbutils.CgroupOwnerGroup, cgroupPath).CombinedOutput()
 			if err != nil {
 				glog.V(5).Infof(krbutils.TSE+"error chown %v: %v", cgroupPath, out)
 			}

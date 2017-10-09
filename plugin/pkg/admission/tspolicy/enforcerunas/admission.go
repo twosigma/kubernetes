@@ -26,7 +26,7 @@ import (
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
 	apierrors "k8s.io/kubernetes/pkg/api/errors"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 )
 
 func init() {

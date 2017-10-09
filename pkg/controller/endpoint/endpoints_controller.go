@@ -33,9 +33,9 @@ import (
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/informers"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
-	krbutils "k8s.io/kubernetes/pkg/util/kerberos"
 	"k8s.io/kubernetes/pkg/util/metrics"
 	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -115,6 +115,12 @@ func NewEndpointController(podInformer cache.SharedIndexInformer, client clients
 	e.podController = podInformer.GetController()
 	e.podStoreSynced = podInformer.HasSynced
 
+	// create Kerberos manager instance
+	// no locking in endpoint manager, so no lock config passed
+	e.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
+
 	return e
 }
 
@@ -156,6 +162,9 @@ type EndpointController struct {
 	// podStoreSynced returns true if the pod store has been synced at least once.
 	// Added as a member to the struct to allow injection for testing.
 	podStoreSynced func() bool
+
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 // Runs e; will not return until stopCh is closed. workers determines how many
@@ -348,7 +357,7 @@ func (e *EndpointController) syncService(key string) error {
 		glog.V(4).Infof(krbutils.TSL+"Service %s/%s deleted, will empty KDC cluster %s",
 			namespace, name, kdcClusterName)
 		// TODO: this should also be serialized - leaving for now given majority of concurrency happens in the kubelets
-		if errClean := krbutils.CleanServiceInKDC(kdcClusterName); errClean != nil {
+		if errClean := e.krbManager.CleanServiceInKDC(kdcClusterName); errClean != nil {
 			glog.Errorf(krbutils.TSE+"error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
 		}
 		if err != nil {
