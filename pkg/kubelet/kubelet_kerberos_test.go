@@ -198,6 +198,76 @@ func testMakeTSMounts_certs(t *testing.T) {
 
 }
 
+func testMakeTSResolveConf(t *testing.T) {
+
+	var localKrb, userPrefixed, services, ticketContent, podIP string
+	var pod api.Pod
+	var mounts, expectedMount []kubecontainer.Mount
+	var err error
+	var kubelet *Kubelet
+	userId := int64(0)
+
+	// validate that standard SSL certs (not a local self-signed) are created (and also ticket)
+	localKrb = "false"
+	userPrefixed = "false"
+	services = "HTTP"
+	ticketContent = "existing ticket"
+	podIP = "192.168.1.1"
+	pod = prepareTestPod(name, namespace, localKrb, userPrefixed, services, ticketContent, runAsUser, &userId)
+	kubelet = prepareKubelet(t)
+	kubelet.resolverConfig = "/etc/resolv.conf"
+	os.Mkdir(kubelet.getPodDir(pod.UID), 0700)
+	pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation] = "true"
+	mounts, err = kubelet.makeTSMounts(&pod, podIP, true)
+	require.NoError(t, err, "Error returned for makeTSMounts")
+	expectedMount = []kubecontainer.Mount{
+		{
+			Name:          "ts-tkt",
+			ContainerPath: krbutils.TicketDirInPod + "/" + runAsUser,
+			HostPath:      kubelet.getPodDir(pod.UID) + "/" + krbutils.TicketDirForPod,
+			ReadOnly:      false,
+		},
+		{
+			Name:          "ts-keytab",
+			ContainerPath: krbutils.KeytabPathInPod,
+			HostPath:      kubelet.getPodDir(pod.UID) + "/keytabs",
+			ReadOnly:      false,
+		},
+		{
+			Name:          "ts-certs",
+			ContainerPath: krbutils.CertsPathInPod + "/" + runAsUser,
+			HostPath:      kubelet.getPodDir(pod.UID) + "/certs",
+			ReadOnly:      false,
+		},
+		{
+			Name:          "resolv",
+			ContainerPath: "/etc/resolv.conf",
+			HostPath:      kubelet.getPodDir(pod.UID) + "/resolv.conf",
+			ReadOnly:      false,
+		},
+	}
+	assert.Equal(t, expectedMount, mounts, "wrong keytab mount in the pod")
+}
+
+func testPodUpdateKerberos(t *testing.T) {
+	var localKrb, userPrefixed, services, ticketContent string
+	var pod api.Pod
+	var kubelet *Kubelet
+	userId := int64(0)
+
+	// validate that standard SSL certs (not a local self-signed) are created (and also ticket)
+	localKrb = "false"
+	userPrefixed = "false"
+	services = "HTTP"
+	ticketContent = "existing ticket"
+	pod = prepareTestPod(name, namespace, localKrb, userPrefixed, services, ticketContent, runAsUser, &userId)
+	kubelet = prepareKubelet(t)
+	kubelet.resolverConfig = "/etc/resolv.conf"
+	os.Mkdir(kubelet.getPodDir(pod.UID), 0700)
+	pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation] = "true"
+	kubelet.podUpdateKerberos(&pod)
+}
+
 func TestMakeTSMounts(t *testing.T) {
 	// test ticket related mounts
 	testMakeTSMounts_ticket(t)
@@ -207,4 +277,10 @@ func TestMakeTSMounts(t *testing.T) {
 
 	// test certificate creation
 	testMakeTSMounts_certs(t)
+
+	// test custom resolv.conf creation
+	testMakeTSResolveConf(t)
+
+	// test pod update
+	testPodUpdateKerberos(t)
 }
