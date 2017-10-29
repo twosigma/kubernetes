@@ -34,13 +34,24 @@ import (
 // Return:
 // - mount pointing to the directory on the host containing the SSL certs for the pod, error if failed
 func (kl *Kubelet) makeCertMount(pod *api.Pod, podKDCClusters map[string]bool, user string) (*kubecontainer.Mount, error) {
+	var areCertsValid bool
+	var errValidate error
 	certsFilePath := path.Join(kl.getPodDir(pod.UID), krbutils.CertsDirForPod)
 	exists, err := checkFileExists(certsFilePath)
 	if err != nil {
 		glog.Errorf(krbutils.TSE+"checking if file exists failed %v", err)
 		return nil, err
 	}
-	if !exists {
+	// check if all 3 cert files exist
+	if exists {
+		if areCertsValid, errValidate = kl.validateCerts(certsFilePath, podKDCClusters); errValidate != nil {
+			glog.Errorf(krbutils.TSE+"validation of SSL certs failed %v", err)
+			return nil, err
+		}
+	} else {
+		areCertsValid = false
+	}
+	if !areCertsValid {
 		kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_CERTS_MOUNT_START", "POD %s", pod.Name)
 		if err := kl.createCerts(certsFilePath, pod, podKDCClusters, user); err != nil {
 			kl.recorder.Eventf(pod, api.EventTypeNormal, "MAKE_CERTS_MOUNT_FAILED", "POD %s , err %v", pod.Name, err)
@@ -54,6 +65,49 @@ func (kl *Kubelet) makeCertMount(pod *api.Pod, podKDCClusters map[string]bool, u
 		HostPath:      certsFilePath,
 		ReadOnly:      false,
 	}, nil
+}
+
+// validateCerts() checks if all 3 SSL cert files (no extension, .key, and .p12) exist
+//
+// Parameters:
+// - certsFilePath - path to the directory containing the certs
+// - podKDCClusters - map with DNS names of the expected KDC clusters that should have certs
+//
+// Return:
+// - true, if all files exist and false is some missing and error, if check could not be done
+func (kl *Kubelet) validateCerts(certsFilePath string, podKDCClusters map[string]bool) (bool, error) {
+	for cluster, _ := range podKDCClusters {
+		// check no extension file
+		certPath := certsFilePath + "/" + cluster
+		exists, err := checkFileExists(certPath)
+		if err != nil {
+			return false, err
+		} else if !exists {
+			glog.Errorf(krbutils.TSE+"validation of SSL certs failed - %s missing", certPath)
+			return false, nil
+		}
+
+		// check .key extension file
+		certPath = certsFilePath + "/" + cluster + ".key"
+		exists, err = checkFileExists(certPath)
+		if err != nil {
+			return false, err
+		} else if !exists {
+			glog.Errorf(krbutils.TSE+"validation of SSL certs failed - %s missing", certPath)
+			return false, nil
+		}
+
+		// check .p12 extension file
+		certPath = certsFilePath + "/" + cluster + ".p12"
+		exists, err = checkFileExists(certPath)
+		if err != nil {
+			return false, err
+		} else if !exists {
+			glog.Errorf(krbutils.TSE+"validation of SSL certs failed - %s missing", certPath)
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // createCerts() requests SSL certificates using "pwdb cert" command and places them in the directory dest/user

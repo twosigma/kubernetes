@@ -163,6 +163,7 @@ func checkFileExists(path string) (bool, error) {
 		if os.IsNotExist(err) {
 			return false, nil
 		} else {
+			glog.Errorf(krbutils.TSE+"checking if file %s exists failed %v", path, err)
 			return false, err
 		}
 	} else {
