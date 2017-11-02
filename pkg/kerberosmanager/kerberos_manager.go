@@ -805,13 +805,23 @@ func (km *KerberosManager) GetKeyVersionsFromKeytab(keytabFilePath string) (map[
 // Return:
 // - error, if failed
 func (km *KerberosManager) SetupKrbACLFile(srv, clusterName string) error {
-	data := []byte(km.KeytabOwner + " " + km.KerberosRealm + " " + srv + " " + clusterName)
-	if err := ioutil.WriteFile(Krb5keytabAclDir+srv+"-"+clusterName, data, 0664); err != nil {
-		glog.Errorf(TSE+"can not create ACL file for service %s in cluster %s, error: %v", srv, clusterName, err)
+	if file, err := ioutil.TempFile(os.TempDir(), "k8s-ACL"); err != nil {
+		glog.Errorf(TSE+"failed to create tmp file for ACL : error %v", err)
 		return err
 	} else {
-		glog.V(5).Infof(TSL+"ACL file for service %s in cluster %s has been created", srv, clusterName)
-		return nil
+		tmpFile := file.Name()
+		defer os.Remove(tmpFile)
+		data := []byte(km.KeytabOwner + " " + km.KerberosRealm + " " + srv + " " + clusterName)
+		if err := ioutil.WriteFile(tmpFile, data, 0664); err != nil {
+			glog.Errorf(TSE+"can not create ACL file for service %s in cluster %s, error: %v", srv, clusterName, err)
+			return err
+		} else if errRename := os.Rename(tmpFile, Krb5keytabAclDir+srv+"-"+clusterName); errRename != nil {
+			glog.Errorf(TSE+"can not rename ACL file %s for service %s in cluster %s, error: %v", tmpFile, srv, clusterName, errRename)
+			return errRename
+		} else {
+			glog.V(5).Infof(TSL+"ACL file for service %s in cluster %s has been created", srv, clusterName)
+			return nil
+		}
 	}
 }
 
@@ -841,7 +851,7 @@ func (km *KerberosManager) RequestKey(srv, clusterName string, mutex *lock.Mutex
 			}
 		}
 		// run the command
-		if out, err := RunCommand(Krb5keytabPath, "-p", km.KeytabOwner, srv+"/"+clusterName); err != nil {
+		if out, err := RunCommand(Krb5keytabPath, "-f", "-p", km.KeytabOwner, srv+"/"+clusterName); err != nil {
 			glog.V(2).Infof(TSL+"TSRETRY error creating service key for service %s "+
 				"in cluster %s during %d retry, error: %v, output: %v", srv, clusterName, retry, err, string(out))
 			return err

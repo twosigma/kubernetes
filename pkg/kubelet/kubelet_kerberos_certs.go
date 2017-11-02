@@ -45,8 +45,8 @@ func (kl *Kubelet) makeCertMount(pod *api.Pod, podKDCClusters map[string]bool, u
 	// check if all 3 cert files exist
 	if exists {
 		if areCertsValid, errValidate = kl.validateCerts(certsFilePath, podKDCClusters); errValidate != nil {
-			glog.Errorf(krbutils.TSE+"validation of SSL certs failed %v", err)
-			return nil, err
+			glog.Errorf(krbutils.TSE+"validation of SSL certs failed %v", errValidate)
+			return nil, errValidate
 		}
 	} else {
 		areCertsValid = false
