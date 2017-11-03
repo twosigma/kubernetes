@@ -118,7 +118,7 @@ const (
 	CgroupOwnerGroup = "tsk8s"
 	// max number of retries when calling Kerbereos utility functions
 	// it is used of exponential back-off in retry function
-	MaxKrb5RetryCount = 4
+	MaxKrb5RetryCount = 6
 	Krb5RetrySleepSec = 2 * time.Second
 	// replica-set name max length
 	RSMaxNameLength = 6
@@ -704,26 +704,28 @@ func (km *KerberosManager) AddHostToClusterInKDC(clusterName, hostName string, m
 		glog.Errorf(TSE+"error adding host %s to cluster %s in KDC after retries, giving up, error: %v", hostName, clusterName, err)
 		return err
 	} else {
+		return nil
 		// validate that the host was added to KDC
-		if errVerify := RetryFunction(func(retry int) error {
-			if isMember, errMember := km.CheckIfHostInKDCCluster(clusterName, hostName); errMember != nil {
-				return errMember
-			} else {
-				if isMember {
-					return nil
+		/*	if errVerify := RetryFunction(func(retry int) error {
+				if isMember, errMember := km.CheckIfHostInKDCCluster(clusterName, hostName); errMember != nil {
+					return errMember
 				} else {
-					glog.Errorf(TSL+"host %s is not in KDC cluster %s after retry %d", hostName, clusterName, retry)
-					return errors.New("host " + hostName + " not in KDC cluster " + clusterName + " yet")
+					if isMember {
+						return nil
+					} else {
+						glog.Errorf(TSL+"host %s is not in KDC cluster %s after retry %d", hostName, clusterName, retry)
+						return errors.New("host " + hostName + " not in KDC cluster " + clusterName + " yet")
+					}
 				}
+			}); errVerify != nil {
+				glog.Errorf(TSE+"could not verify that host %s is in KDC cluster %s after retries, giving up, error: %v",
+					hostName, clusterName, errVerify)
+				return errVerify
+			} else {
+				glog.V(5).Infof(TSL+"host %s was verified present in KDC cluster %s", hostName, clusterName)
+				return nil
 			}
-		}); errVerify != nil {
-			glog.Errorf(TSE+"could not verify that host %s is in KDC cluster %s after retries, giving up, error: %v",
-				hostName, clusterName, errVerify)
-			return errVerify
-		} else {
-			glog.V(5).Infof(TSL+"host %s was verified present in KDC cluster %s", hostName, clusterName)
-			return nil
-		}
+		*/
 	}
 }
 
