@@ -108,32 +108,12 @@ func (sc *SecurityCredentialsController) Run() {
 							// check if the ticket was refreshed since the last run
 							modTime = fileInfo.ModTime()
 							if modTime.After(lastRunTime) || modTime.Equal(lastRunTime) {
-								// identify the node where the pod runs
-								dest := pod.Spec.NodeName
-								if dest == "" {
-									// no destination node, Pod is Pending, skip
-									glog.V(5).Infof(krbutils.TSL+"pod %s does not have node assigned, skipping refresh",
-										pod.Name)
-									continue
-								}
 								glog.V(2).Infof(krbutils.TSL+"ticket for user %s@%s was updated, refreshing",
 									user, krbManager.KerberosRealm)
-								// encrypt the ticket with destination public key of the host on which the pod runs
-								if encryptedTicket, err := krbManager.EncryptTicket(tktPath, dest); err != nil {
-									glog.Errorf(krbutils.TSE+"ticket encryption failed: error %v", err)
+								if err := sc.UpdateTicketForPod(&pod, krbManager, tktPath); err != nil {
+									glog.Errorf(krbutils.TSE+"Error refetching POD %s: %v", pod.Name, err)
 								} else {
-									glog.V(5).Infof(krbutils.TSL + "ticket encrypted")
-									// put the encrypted ticket in pod's manifest
-									pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = encryptedTicket
-									// invoke pod update - send updated manifest to the apiserver
-									// the kubelet will get it, decrypt using host's private key, and deposit in
-									// pod's filesystem
-									if _, err := sc.kubeClient.Core().Pods(pod.ObjectMeta.Namespace).
-										Update(&pod); err != nil {
-										glog.Errorf(krbutils.TSE+"Error updating POD: %v", err)
-									} else {
-										glog.V(4).Infof(krbutils.TSL+"updated POD %s", pod.Name)
-									}
+									glog.V(4).Infof(krbutils.TSL+"updated POD %s", pod.Name)
 								}
 							} else {
 								glog.V(5).Infof(krbutils.TSL+"ticket for user %s@%s does not require a refresh",
@@ -147,4 +127,57 @@ func (sc *SecurityCredentialsController) Run() {
 		lastRunTime = curRunTime
 	}, sc.allowedTktAgeMinutes, wait.NeverStop)
 	glog.V(2).Infof(krbutils.TSL + "TS Security Credentials Controller started")
+}
+
+// UpdateTicketForPod() updates the ticket for a given Pod. It does that by encrypting the pre-stashed ticket
+// and sending (in the updated manifest) to the kubelet that performes the actual update.
+//
+// Parameters:
+// - pod - pod to be updated
+// - krbManager - handle to Kerberos manager
+// - tktPath - path to prestashed ticket on the host
+//
+// Return:
+// - error, if failed
+func (sc *SecurityCredentialsController) UpdateTicketForPod(pod *api.Pod, krbManager krbutils.KrbManager, tktPath string) error {
+	// identify the node where the pod runs
+	dest := pod.Spec.NodeName
+	if dest == "" {
+		// no destination node, Pod is Pending, skip
+		glog.V(5).Infof(krbutils.TSL+"pod %s does not have node assigned, skipping refresh",
+			pod.Name)
+		return nil
+	}
+	// encrypt the ticket with destination public key of the host on which the pod runs
+	if encryptedTicket, err := krbManager.EncryptTicket(tktPath, dest); err != nil {
+		glog.Errorf(krbutils.TSE+"ticket encryption failed: error %v", err)
+		return err
+	} else {
+		glog.V(5).Infof(krbutils.TSL + "ticket encrypted")
+		// put the encrypted ticket in pod's manifest
+		pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = encryptedTicket
+		// invoke pod update - send updated manifest to the apiserver
+		// the kubelet will get it, decrypt using host's private key, and deposit in
+		// pod's filesystem
+		if _, err := sc.kubeClient.Core().Pods(pod.ObjectMeta.Namespace).Update(pod); err != nil {
+			glog.Errorf(krbutils.TSE+"error updating POD %s on first attempt: %v", pod.Name, err)
+			// update may fail because pod has changed, fetch fresh pod object and retry
+			if podToUpdate, errFetch := sc.kubeClient.Core().Pods(pod.ObjectMeta.Namespace).Get(pod.Name); errFetch != nil {
+				glog.Errorf(krbutils.TSE+"Error refetching POD %s: %v", pod.Name, errFetch)
+				return errFetch
+			} else {
+				// refetch succeeded, attempt to update
+				podToUpdate.ObjectMeta.Annotations[krbutils.TSTicketAnnotation] = encryptedTicket
+				if _, errRetry := sc.kubeClient.Core().Pods(podToUpdate.ObjectMeta.Namespace).Update(podToUpdate); errRetry != nil {
+					glog.Errorf(krbutils.TSE+"Error updating POD %s after refetch: %v", pod.Name, errRetry)
+					return errRetry
+				} else {
+					glog.V(4).Infof(krbutils.TSL+"updated POD %s after refetch", pod.Name)
+					return nil
+				}
+			}
+		} else {
+			return nil
+		}
+	}
 }
