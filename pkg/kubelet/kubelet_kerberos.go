@@ -509,6 +509,10 @@ func (kl *Kubelet) GetPodServiceClusters(pod *api.Pod) (map[string]bool, error) 
 		serviceClusters := make(map[string]bool)
 		for i := range services {
 			service := services[i]
+			// HOT patch - need to fix the filter above
+			if service.Namespace != pod.Namespace {
+				continue
+			}
 			serviceCluster := service.Name + "." + service.Namespace + ".svc." + kl.clusterDomain
 			isMember := false
 			for selKey, selVal := range service.Spec.Selector {
