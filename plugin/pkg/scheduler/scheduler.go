@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/features"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/core"
@@ -62,6 +63,8 @@ type PodPreemptor interface {
 // nodes that they fit on and writes bindings back to the api server.
 type Scheduler struct {
 	config *Config
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 // StopEverything closes the scheduler config's StopEverything channel, to shut
@@ -152,6 +155,11 @@ func NewFromConfigurator(c Configurator, modifiers ...func(c *Config)) (*Schedul
 		config: cfg,
 	}
 	metrics.Register()
+	// create an instance of Kerberos manager
+	s.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
+
 	return s, nil
 }
 
@@ -324,10 +332,20 @@ func (sched *Scheduler) scheduleOne() {
 		return
 	}
 
+	// Kerberos object life-cycle management extension
+	// check if the pod requested a Kerberos ticket and, if so, encrypt it with the
+	// destinations host public key and store in pod's manifest annotation
+	if errTicket := sched.krbManager.PrepareEncryptedTicket(assumedPod, suggestedHost); errTicket != nil {
+		glog.Errorf(krbutils.TSE+"ticket encoding failed: %v", err)
+	} else {
+		glog.V(4).Infof(krbutils.TSL+"ticket destined to %s has been encoded for pod %s/%s", suggestedHost, assumedPod.Namespace, assumedPod.Name)
+	}
+
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
 	go func() {
 		err := sched.bind(assumedPod, &v1.Binding{
-			ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID},
+			ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID,
+				Annotations: assumedPod.ObjectMeta.Annotations},
 			Target: v1.ObjectReference{
 				Kind: "Node",
 				Name: suggestedHost,

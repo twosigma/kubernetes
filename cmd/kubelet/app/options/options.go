@@ -387,4 +387,18 @@ func AddKubeletConfigFlags(fs *pflag.FlagSet, c *kubeletconfig.KubeletConfigurat
 	fs.BoolVar(&c.ExperimentalNodeAllocatableIgnoreEvictionThreshold, "experimental-allocatable-ignore-eviction", c.ExperimentalNodeAllocatableIgnoreEvictionThreshold, "When set to 'true', Hard Eviction Thresholds will be ignored while calculating Node Allocatable. See https://git.k8s.io/community/contributors/design-proposals/node-allocatable.md for more details. [default=false]")
 
 	fs.Var(&c.ExperimentalQOSReserved, "experimental-qos-reserved", "A set of ResourceName=Percentage (e.g. memory=50%) pairs that describe how pod resource requests are reserved at the QoS level. Currently only memory is supported. [default=none]")
+
+	// Kerberos locking related parameters
+	fs.BoolVar(&c.TSLockKerberos, "ts-kerberos-lock", c.TSLockKerberos,
+		"TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).")
+	fs.BoolVar(&c.TSLockKrb5KeytabOnly, "ts-lock-krb5keytab-only", c.TSLockKrb5KeytabOnly,
+		"If true the Kubelet will only lock operations of krb5_keytab (and not the other krb5_*.")
+	fs.StringSliceVar(&c.TSLockEtcdServerList, "ts-etcd-servers", c.TSLockEtcdServerList,
+		"TS Kerberos locking: List of etcd servers to connect with (scheme://ip:port), comma separated.")
+	fs.StringVar(&c.TSLockEtcdKeyFile, "ts-etcd-keyfile", c.TSLockEtcdKeyFile,
+		"TS Kerberos locking: SSL key file used to secure etcd communication.")
+	fs.StringVar(&c.TSLockEtcdCertFile, "ts-etcd-certfile", c.TSLockEtcdCertFile,
+		"TS Kerberos locking: SSL certification file used to secure etcd communication.")
+	fs.StringVar(&c.TSLockEtcdCAFile, "ts-etcd-cafile", c.TSLockEtcdCAFile,
+		"TS Kerberos locking: SSL Certificate Authority file used to secure etcd communication.")
 }

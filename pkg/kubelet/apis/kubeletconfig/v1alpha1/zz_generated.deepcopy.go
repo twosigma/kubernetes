@@ -455,6 +455,11 @@ func (in *KubeletConfiguration) DeepCopyInto(out *KubeletConfiguration) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.TSLockEtcdServerList != nil {
+		in, out := &in.TSLockEtcdServerList, &out.TSLockEtcdServerList
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	return
 }
 

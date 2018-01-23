@@ -51,6 +51,7 @@ import (
 	"k8s.io/kubernetes/pkg/api/v1/validation"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/fieldpath"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -428,6 +429,17 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 		return nil, false, err
 	}
 	opts.Mounts = append(opts.Mounts, mounts...)
+
+	// create all required TS mounts (for Kerberos ticket, keytabs, certs, and custom resolve.conf)
+	//	if tsMounts, err := kl.makeTSMounts(pod, podIP, kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
+	if tsMounts, err := kl.makeTSMounts(pod, podIP, false); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
+		return nil, false, err
+	} else {
+		if len(tsMounts) > 0 {
+			opts.Mounts = append(opts.Mounts, tsMounts...)
+		}
+	}
 
 	envs, err := kl.makeEnvironmentVariables(pod, container, podIP)
 	if err != nil {

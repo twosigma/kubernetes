@@ -108,6 +108,16 @@ func (cmd *cmdWrapper) SetStderr(out io.Writer) {
 	cmd.Stderr = out
 }
 
+// TS mod
+func (cmd *cmdWrapper) SetEnv(env []string) {
+	cmd.Env = env
+}
+
+// TS mod
+func (cmd *cmdWrapper) StdinPipe() (io.WriteCloser, error) {
+	return (*osexec.Cmd)(cmd).StdinPipe()
+}
+
 // Run is part of the Cmd interface.
 func (cmd *cmdWrapper) Run() error {
 	return (*osexec.Cmd)(cmd).Run()

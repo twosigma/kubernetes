@@ -49,6 +49,7 @@ import (
 	routecontroller "k8s.io/kubernetes/pkg/controller/route"
 	servicecontroller "k8s.io/kubernetes/pkg/controller/service"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	tssecuritycontroller "k8s.io/kubernetes/pkg/controller/ts"
 	ttlcontroller "k8s.io/kubernetes/pkg/controller/ttl"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach"
 	"k8s.io/kubernetes/pkg/controller/volume/expand"
@@ -361,5 +362,13 @@ func startGarbageCollectorController(ctx ControllerContext) (bool, error) {
 	// the garbage collector.
 	go garbageCollector.Sync(gcClientset.Discovery(), 30*time.Second, ctx.Stop)
 
+	return true, nil
+}
+
+func startTSSecurityController(ctx ControllerContext) (bool, error) {
+	go tssecuritycontroller.NewSecurityCredentialsController(
+		ctx.InformerFactory.Core().V1().Pods(),
+		ctx.ClientBuilder.ClientOrDie("tssecurity-controller"),
+	).Run(ctx.Stop)
 	return true, nil
 }

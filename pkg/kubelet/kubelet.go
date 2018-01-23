@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -60,6 +61,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/features"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	internalapi "k8s.io/kubernetes/pkg/kubelet/apis/cri"
 	kubeletconfiginternal "k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig"
 	kubeletconfigv1alpha1 "k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig/v1alpha1"
@@ -876,6 +878,19 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	// Finally, put the most recent version of the config on the Kubelet, so
 	// people can see how it was configured.
 	klet.kubeletConfiguration = *kubeCfg
+
+	// create Kerberos manager instance
+	if klet.krbManager, err = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{
+			TSLockEtcdServerList: klet.kubeletConfiguration.TSLockEtcdServerList,
+			TSLockEtcdCertFile:   klet.kubeletConfiguration.TSLockEtcdCertFile,
+			TSLockEtcdKeyFile:    klet.kubeletConfiguration.TSLockEtcdKeyFile,
+			TSLockEtcdCAFile:     klet.kubeletConfiguration.TSLockEtcdCAFile,
+		},
+	); err != nil {
+		return nil, err
+	}
+
 	return klet, nil
 }
 
@@ -1158,6 +1173,8 @@ type Kubelet struct {
 
 	// StatsProvider provides the node and the container stats.
 	*stats.StatsProvider
+
+	krbManager krbutils.KrbManager
 }
 
 func allLocalIPsWithoutLoopback() ([]net.IP, error) {
@@ -1380,6 +1397,10 @@ func (kl *Kubelet) GetClusterDNS(pod *v1.Pod) ([]string, []string, bool, error) 
 		if err != nil {
 			return nil, nil, false, err
 		}
+		// TS mod, ignore link local dns resolvers to skip unbound
+		hostDNS = krbutils.Filter(hostDNS, func(v string) bool {
+			return !strings.HasPrefix(v, "127.")
+		})
 	}
 	useClusterFirstPolicy := ((pod.Spec.DNSPolicy == v1.DNSClusterFirst && !kubecontainer.IsHostNetworkPod(pod)) || pod.Spec.DNSPolicy == v1.DNSClusterFirstWithHostNet)
 	if useClusterFirstPolicy && len(kl.clusterDNS) == 0 {
@@ -1766,6 +1787,12 @@ func (kl *Kubelet) canRunPod(pod *v1.Pod) lifecycle.PodAdmitResult {
 // state every sync-frequency seconds. Never returns.
 func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHandler) {
 	glog.Info("Starting kubelet main sync loop.")
+	// TS mod
+	// sleep a bit to introduce jitter in kubelet loops across the cluster
+	// to prevent (almost) synchronized calls to Kerberos utilities
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	time.Sleep(time.Duration(r.Intn(5000)) * time.Millisecond)
+
 	// The resyncTicker wakes up kubelet to checks if there are any pod workers
 	// that need to be sync'd. A one-second period is sufficient because the
 	// sync interval is defaulted to 10s.
@@ -2002,6 +2029,19 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 func (kl *Kubelet) HandlePodUpdates(pods []*v1.Pod) {
 	start := kl.clock.Now()
 	for _, pod := range pods {
+		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+			if pod.DeletionTimestamp != nil {
+				// clean-up Kerberos state (to be used with keytab handling)
+				//				kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
+			} else {
+				// check if the updated Pod has an encoded ticket (ts/ticket annotation) and, if it does, trigger refresh
+				if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {
+					// ignore error here, since can not do much besides looging (inside the function)
+					_ = kl.refreshTSTkt(pod, user, tkt)
+				}
+			}
+		}
+
 		kl.podManager.UpdatePod(pod)
 		if kubepod.IsMirrorPod(pod) {
 			kl.handleMirrorPod(pod, start)
