@@ -9,7 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/api/core/v1"
 	lock "k8s.io/kubernetes/pkg/util/lock"
 )
 
@@ -257,4 +257,8 @@ func (km *FakeKerberosManager) GetSelfSignedSSLCert(clusterName string) error {
 		_, err = f.WriteString("self-signed-SSL-cert-file-for-" + clusterName + "\n")
 		return err
 	}
+}
+
+func (km *FakeKerberosManager) InvokePodKeytabRefresh(pod *api.Pod, trimKeytab bool) error {
+	return nil
 }

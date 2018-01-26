@@ -134,7 +134,7 @@ const (
 	podKillingChannelCapacity = 50
 
 	// Period for performing global cleanup tasks.
-	housekeepingPeriod = time.Second * 2
+	housekeepingPeriod = time.Second * 5
 
 	// Period for performing eviction monitoring.
 	// TODO ensure this is in sync with internal cadvisor housekeeping.
@@ -169,6 +169,10 @@ const (
 
 	// Minimum number of dead containers to keep in a pod
 	minDeadContainerInPod = 1
+
+	// capacity of the Kerberos management channel
+	// larger capacity may required since krb5_* operations can be slow
+	podKerberosChannelCapacity = 500
 )
 
 // SyncHandler is an interface implemented by Kubelet, for testability
@@ -879,6 +883,9 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	// people can see how it was configured.
 	klet.kubeletConfiguration = *kubeCfg
 
+	// create Kerberos management channel
+	klet.podKerberosCh = make(chan *PodUpdateKerberosMessage, podKerberosChannelCapacity)
+
 	// create Kerberos manager instance
 	if klet.krbManager, err = krbutils.NewKerberosManager(
 		krbutils.KrbManagerParameters{
@@ -896,6 +903,11 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 
 type serviceLister interface {
 	List(labels.Selector) ([]*v1.Service, error)
+}
+
+type PodUpdateKerberosMessage struct {
+	// APIPod is the api.Pod
+	APIPod *v1.Pod
 }
 
 // Kubelet is the main kubelet implementation.
@@ -1174,6 +1186,9 @@ type Kubelet struct {
 	// StatsProvider provides the node and the container stats.
 	*stats.StatsProvider
 
+	// channel for Kerberos management
+	podKerberosCh chan *PodUpdateKerberosMessage
+
 	krbManager krbutils.KrbManager
 }
 
@@ -1369,6 +1384,9 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 	kl.statusManager.Start()
 	kl.probeManager.Start()
 
+	// Start a goroutine responsible for managing Kerberos objects for Pods
+	go wait.Until(kl.podKerberosManager, 5*time.Second, wait.NeverStop)
+
 	// Start the pod lifecycle event generator.
 	kl.pleg.Start()
 	kl.syncLoop(updates, kl)
@@ -1379,6 +1397,11 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 // with more specific methods.
 func (kl *Kubelet) GetKubeClient() clientset.Interface {
 	return kl.kubeClient
+}
+
+// exporting to enable REST server to have access to the cluster domain for Kerberos keytab extraction and split
+func (kl *Kubelet) GetClusterDomain() string {
+	return kl.clusterDomain
 }
 
 // GetClusterDNS returns a list of the DNS servers and a list of the DNS search
@@ -2032,7 +2055,7 @@ func (kl *Kubelet) HandlePodUpdates(pods []*v1.Pod) {
 		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
 			if pod.DeletionTimestamp != nil {
 				// clean-up Kerberos state (to be used with keytab handling)
-				//				kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
+				kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
 			} else {
 				// check if the updated Pod has an encoded ticket (ts/ticket annotation) and, if it does, trigger refresh
 				if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {

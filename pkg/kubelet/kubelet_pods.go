@@ -1009,6 +1009,15 @@ func (kl *Kubelet) HandlePodCleanups() error {
 		}
 	}
 
+	// manage Kerberos for the active Pods
+	for _, pod := range kl.GetActivePods() {
+		needKeytabs, needCerts, _, _ := kl.checkIfPodUsesKerberos(pod)
+		if needCerts || needKeytabs {
+			glog.V(5).Infof(krbutils.TSL+"managing Kerberos objects for Pod %s in HandlePodCleanups()", pod.Name)
+			kl.podKerberosCh <- &PodUpdateKerberosMessage{APIPod: pod}
+		}
+	}
+
 	kl.removeOrphanedPodStatuses(allPods, mirrorPods)
 	// Note that we just killed the unwanted pods. This may not have reflected
 	// in the cache. We need to bypass the cache to get the latest set of

@@ -133,6 +133,10 @@ func (fk *fakeKubelet) GetHostname() string {
 	return fk.hostnameFunc()
 }
 
+func (kl *fakeKubelet) GetAllPodKDCClusterNames(pod *v1.Pod) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
 func (fk *fakeKubelet) RunInContainer(podFullName string, uid types.UID, containerName string, cmd []string) ([]byte, error) {
 	return fk.runFunc(podFullName, uid, containerName, cmd)
 }
@@ -178,6 +182,18 @@ func (_ *fakeKubelet) ListPodStats() ([]statsapi.PodStats, error) { return nil, 
 func (_ *fakeKubelet) ImageFsStats() (*statsapi.FsStats, error)   { return nil, nil }
 func (_ *fakeKubelet) GetCgroupStats(cgroupName string) (*statsapi.ContainerStats, *statsapi.NetworkStats, error) {
 	return nil, nil, nil
+}
+
+func (fk *fakeKubelet) GetPodDir(podUID types.UID) string {
+	return "/fakePoddir"
+}
+
+func (fk *fakeKubelet) GetClusterDomain() string {
+	return "cluster.local"
+}
+
+func (fk *fakeKubelet) GetPodServiceClusters(pod *v1.Pod) (map[string]bool, error) {
+	return map[string]bool{}, nil
 }
 
 type fakeAuth struct {
@@ -640,7 +656,8 @@ func TestAuthFilters(t *testing.T) {
 			isSubpath(path, "/portForward"),
 			isSubpath(path, "/run"),
 			isSubpath(path, "/runningpods"),
-			isSubpath(path, "/cri"):
+			isSubpath(path, "/cri"),
+			isSubpath(path, "/refreshkeytabs"):
 			return "proxy"
 
 		default:

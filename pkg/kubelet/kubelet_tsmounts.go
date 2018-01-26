@@ -25,6 +25,12 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podIP string, customResolvConf boo
 	// mount array to store all of the TS specific mounts that this method creates
 	tsMounts := []kubecontainer.Mount{}
 
+	// the function may be invoked multiple times for the same Pod (by the Kubelet)
+	// ignore invocations where podIP is not yet set
+	if len(podIP) == 0 {
+		return tsMounts, nil
+	}
+
 	// set up Kerberos ticket, if asked for and the user owning the container is known
 	if tkt, ok := pod.ObjectMeta.Annotations[krbutils.TSTicketAnnotation]; ok {
 		if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
@@ -35,6 +41,69 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podIP string, customResolvConf boo
 				return nil, err
 			} else {
 				tsMounts = append(tsMounts, *tktMount)
+			}
+		}
+	}
+
+	// Register in KDC under the DNS name as a singleton Pod cluster, create bind-mount for the keytab, and trigger the keytab fetch
+	needKeytabs := false
+	needCerts := false
+	if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+		// check if Pod needs any keytabs (and for what services) and SSL certs
+		services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]
+		if ok && services != "" {
+			needKeytabs = true
+		} else {
+			services = ""
+		}
+		doCerts, ok := pod.ObjectMeta.Annotations[krbutils.TSCertsAnnotation]
+		if ok && doCerts == "true" {
+			needCerts = true
+		}
+
+		// compute the list of all DNS names of KDC clusters that Pod requested to be a member of
+		podKDCClusters, err := kl.GetAllPodKDCClusterNames(pod)
+		if err != nil {
+			glog.Errorf(krbutils.TSE+"error while getting KDC clusters for the POD %s, error: %v", pod.Name, err)
+			return nil, err
+		}
+
+		// obtain keytabs, if asked for. Note that the makeKeytabMount function is still called even if only SSL certs are requested.
+		// The reason is that it also performs cluster KDC registration (which is required for SSL certs even without keytabs).
+		if needKeytabs || needCerts {
+			glog.V(5).Infof(krbutils.TSL+"managing KDC clusters for keytabs/certs for the Pod %s user %s and services %+v",
+				pod.Name, user, services)
+			// create required KDC clusters and join the node to them. Also, if services != "" then request keytabs and
+			// return mount object pointed at the keytab file.
+			keytabMount, err := kl.makeKeytabMount(pod, services, podKDCClusters, user)
+			if err != nil {
+				glog.Errorf(krbutils.TSE+"unable to create keytab for Pod %s user %s and services %s: %+v",
+					pod.Name, user, services, err)
+				return nil, err
+			} else {
+				if keytabMount != nil {
+					tsMounts = append(tsMounts, *keytabMount)
+					glog.V(5).Infof(krbutils.TSL+"keytab for the Pod %s user %s and services %+v created",
+						pod.Name, user, services)
+				} else {
+					glog.V(5).Infof(krbutils.TSL+"KDC clusters for the Pod %s user %s registered, but no keytab since services empty",
+						pod.Name, user)
+				}
+			}
+		}
+
+		// obtain the SSL certificates, if required
+		// Note that the KDC cluster registration has already been done in makeKeytabMount() function
+		if needCerts {
+			glog.V(5).Infof(krbutils.TSL+"creating SSL certs for the Pod %s and user %s", pod.Name, user)
+			// obtain SSL certificates and return mount object pointing to the directory containing them
+			certsMount, err := kl.makeCertMount(pod, podKDCClusters, user)
+			if err != nil {
+				glog.Errorf(krbutils.TSE+"unable to create SSL certs for Pod %s and user %s, error %+v", pod.Name, user, err)
+				return nil, err
+			} else {
+				tsMounts = append(tsMounts, *certsMount)
+				glog.V(5).Infof(krbutils.TSL+"created SSL certs for the Pod %s and user %s", pod.Name, user)
 			}
 		}
 	}

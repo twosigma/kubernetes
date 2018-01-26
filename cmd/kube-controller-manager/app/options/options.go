@@ -85,6 +85,7 @@ func NewCMServer() *CMServer {
 			NodeStartupGracePeriod:                          metav1.Duration{Duration: 60 * time.Second},
 			NodeMonitorPeriod:                               metav1.Duration{Duration: 5 * time.Second},
 			ClusterName:                                     "kubernetes",
+			ClusterDomain:                                   "cluster.local.",
 			NodeCIDRMaskSize:                                24,
 			ConfigureCloudRoutes:                            true,
 			TerminatedPodGCThreshold:                        12500,
@@ -191,6 +192,7 @@ func (s *CMServer) AddFlags(fs *pflag.FlagSet, allControllers []string, disabled
 	fs.BoolVar(&s.EnableProfiling, "profiling", true, "Enable profiling via web interface host:port/debug/pprof/")
 	fs.BoolVar(&s.EnableContentionProfiling, "contention-profiling", false, "Enable lock contention profiling, if profiling is enabled")
 	fs.StringVar(&s.ClusterName, "cluster-name", s.ClusterName, "The instance prefix for the cluster")
+	fs.StringVar(&s.ClusterDomain, "cluster-domain", s.ClusterDomain, "The cluster domain")
 	fs.StringVar(&s.ClusterCIDR, "cluster-cidr", s.ClusterCIDR, "CIDR Range for Pods in cluster.")
 	fs.StringVar(&s.ServiceCIDR, "service-cluster-ip-range", s.ServiceCIDR, "CIDR Range for Services in cluster.")
 	fs.Int32Var(&s.NodeCIDRMaskSize, "node-cidr-mask-size", s.NodeCIDRMaskSize, "Mask size for node cidr in cluster.")

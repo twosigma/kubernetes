@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
 	lock "k8s.io/kubernetes/pkg/util/lock"
 )
 
@@ -25,7 +25,7 @@ import (
 //
 // Return:
 // - username and error, if failed
-func GetRunAsUsername(pod *api.Pod) (string, error) {
+func GetRunAsUsername(pod *v1.Pod) (string, error) {
 	// get user ID from pod security context
 	if pod.Spec.SecurityContext == nil {
 		return "", errors.New("security context not defined for Pod " + pod.Namespace + "/" + pod.Name)
@@ -209,7 +209,7 @@ func CopyFile(src, dest string) error {
 //
 // Return:
 // - domain name of the DNS name of the pod
-func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
+func GetPodDomainName(pod *v1.Pod, clusterDomain string) string {
 	return pod.Namespace + "." + clusterDomain
 }
 
@@ -223,7 +223,7 @@ func GetPodDomainName(pod *api.Pod, clusterDomain string) string {
 //
 // Return:
 // - map with DNS names of the KDC clusters that the pod belongs to and error, if failed
-func GetPodKDCClusterNames(pod *api.Pod, clusterDomain string) (map[string]bool, error) {
+func GetPodKDCClusterNames(pod *v1.Pod, clusterDomain string) (map[string]bool, error) {
 	podKDCHostnames := make(map[string]bool)
 	if userName, err := GetRunAsUsername(pod); err != nil {
 		return podKDCHostnames, err

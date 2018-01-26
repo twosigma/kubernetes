@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
+	"net/url"
 	"os"
 	exe "os/exec"
 	"regexp"
@@ -182,6 +184,9 @@ type KrbManager interface {
 	// Kerberos pwdb SSL cert management functions
 	GetPwdbSSLCert(clusterName string) error
 	GetSelfSignedSSLCert(clusterName string) error
+
+	// invoking callback routine to distribute keytabs
+	InvokePodKeytabRefresh(pod *api.Pod, trimKeytab bool) error
 
 	// config access and support functions
 	GetKeytabOwner() string
@@ -962,6 +967,33 @@ func (km *KerberosManager) ChangeFileOwnership(file, user, group string) error {
 	} else {
 		glog.V(5).Infof(TSL+"changed owner to %v for file %s, output %s", owner, file, string(out))
 		return nil
+	}
+}
+
+// invokePodKeytabRefresh() calls handler to refresh keytabs inside of Pods
+//
+// Parameters:
+// - pod - pod to refresh
+// - trimKeytab - boolean indicating wether to trim the keytab (remove entries not used by any pods)
+//
+// Return:
+// - error, if failed
+func (km *KerberosManager) InvokePodKeytabRefresh(pod *api.Pod, trimKeytab bool) error {
+	data := url.Values{}
+	data.Set("keytabpath", km.GetHostKeytabFile())
+	data.Set("trimkeytab", "false")
+	if resp, err := http.Post(KubeletRESTServiceURL, "text/plain", bytes.NewBufferString(data.Encode())); err != nil {
+		glog.Errorf(TSE+"invokePodKeytabRefresh for Pod %s failed, err: %+v", pod.Name, err)
+		return err
+	} else {
+		if resp.StatusCode != 200 {
+			glog.Errorf(TSE+"invokePodKeytabRefresh for Pod %s failed, http server returned code %d with message %s",
+				pod.Name, resp.StatusCode, resp.Status)
+			return errors.New("invokePodKeytabRefresh for Pod " + pod.Name + "failed with error message from httpserver " + resp.Status)
+		} else {
+			glog.V(5).Infof(TSL+"invokePodKeytabRefresh succeeded for Pod %s", pod.Name)
+			return nil
+		}
 	}
 }
 

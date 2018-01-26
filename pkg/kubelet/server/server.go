@@ -17,17 +17,25 @@ limitations under the License.
 package server
 
 import (
+	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"net/url"
+	"os"
+	exe "os/exec"
+	"path"
 	"reflect"
+	"regexp"
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	restful "github.com/emicklei/go-restful"
@@ -52,6 +60,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/v1/validation"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/server/portforward"
 	remotecommandserver "k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
@@ -60,6 +69,7 @@ import (
 	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/util/configz"
 	"k8s.io/kubernetes/pkg/util/limitwriter"
+	lock "k8s.io/kubernetes/pkg/util/lock"
 )
 
 const (
@@ -77,6 +87,9 @@ type Server struct {
 	restfulCont      containerInterface
 	resourceAnalyzer stats.ResourceAnalyzer
 	runtime          kubecontainer.Runtime
+
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 type TLSOptions struct {
@@ -183,6 +196,11 @@ type HostInterface interface {
 	GetExec(podFullName string, podUID types.UID, containerName string, cmd []string, streamOpts remotecommandserver.Options) (*url.URL, error)
 	GetAttach(podFullName string, podUID types.UID, containerName string, streamOpts remotecommandserver.Options) (*url.URL, error)
 	GetPortForward(podName, podNamespace string, podUID types.UID, portForwardOpts portforward.V4Options) (*url.URL, error)
+
+	GetPodDir(podUID types.UID) string
+	GetClusterDomain() string
+	GetPodServiceClusters(pod *v1.Pod) (map[string]bool, error)
+	GetAllPodKDCClusterNames(pod *v1.Pod) (map[string]bool, error)
 }
 
 // NewServer initializes and configures a kubelet.Server object to handle HTTP requests.
@@ -211,6 +229,11 @@ func NewServer(
 			goruntime.SetBlockProfileRate(1)
 		}
 	}
+	// create Kerberos manager instance
+	// no locking in server manager, so no lock config passed
+	server.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
 	return server
 }
 
@@ -286,6 +309,15 @@ func (s *Server) InstallDefaultHandlers() {
 		To(s.getSpec).
 		Operation("getSpec").
 		Writes(cadvisorapi.MachineInfo{}))
+	s.restfulCont.Add(ws)
+
+	// A handle to refresh Kerberos keytabs.
+	// It gets invoked by krb5_keytab callback utility
+	// each time the underlying keytab file on the host
+	// has been updated.
+	ws = new(restful.WebService)
+	ws.Path("/refreshkeytabs")
+	ws.Route(ws.POST("").To(s.refreshKeytabs))
 	s.restfulCont.Add(ws)
 }
 
@@ -533,6 +565,306 @@ func encodePods(pods []*v1.Pod) (data []byte, err error) {
 	// TODO: Locked to v1, needs to be made generic
 	codec := api.Codecs.LegacyCodec(schema.GroupVersion{Group: v1.GroupName, Version: "v1"})
 	return runtime.Encode(codec, podList)
+}
+
+// mutex to ensure that only one keytab refresh is happenning at a time
+var keytabLock sync.RWMutex
+
+// Refreshes keytabs for all containers using them. The keytab file content, which contains
+// principals for all PODs on this node, gets split into parts and propagated into respective
+// POD keytab files. It also trims the keytab file by removing all principals that are not
+// referenced by any of the Pods known to kubelet.
+func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Response) {
+	startLock := time.Now()
+	keytabLock.Lock()
+	defer keytabLock.Unlock()
+
+	defer lock.ExecTime(time.Now(), "refreshKeytabs", "")
+	trimKeytab := true
+	glog.V(4).Infof(krbutils.TSL+"starting Keytab refresh in REST servlet, lock wait time was %d ns", time.Since(startLock).Nanoseconds())
+
+	var lastError error
+	response.AddHeader("Content-Type", "text/plain")
+	if body, err := ioutil.ReadAll(request.Request.Body); err != nil {
+		glog.Errorf(krbutils.TSE+"failed while reading POST body: %v", err)
+		response.WriteErrorString(http.StatusInternalServerError, err.Error())
+		return
+	} else {
+		values, errParse := url.ParseQuery(string(body))
+		if errParse != nil {
+			glog.Errorf(krbutils.TSE+"failed while parsing the POST body: %v", errParse)
+			response.WriteErrorString(http.StatusInternalServerError, errParse.Error())
+			return
+		}
+		keytabFile := values["keytabpath"][0]
+		if v, ok := values["trimkeytab"]; ok {
+			if v[0] == "true" {
+				trimKeytab = true
+			} else {
+				trimKeytab = false
+			}
+		} else {
+			trimKeytab = true
+		}
+		glog.V(4).Infof(krbutils.TSL+"Keytab file (to be distributed to containers) is %s", keytabFile)
+
+		pods := s.host.GetPods()
+		allNeededPrincipals := map[string]bool{}
+		realm := s.krbManager.GetKerberosRealm()
+		for _, pod := range pods {
+			if user, ok := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok {
+				if services, ok := pod.ObjectMeta.Annotations[krbutils.TSServicesAnnotation]; ok {
+					// do not distribute keytabs to Pods that use local keytabs (since they do not come from host keytab file)
+					if krbLocal, ok := pod.ObjectMeta.Annotations[krbutils.TSKrbLocal]; ok && krbLocal == "true" {
+						continue
+					}
+					if pod.Spec.SecurityContext.RunAsUser != nil {
+						// skip the Pods being deleted
+						if pod.DeletionTimestamp != nil {
+							continue
+						}
+						glog.V(5).Infof(krbutils.TSL+"will refresh keytab file for pod %s", pod.Name)
+						// extract from global keytab file the parts relevant to this POD
+						if principals, err := s.refreshKeytab(keytabFile, pod, user, services, realm); err != nil {
+							glog.Errorf(krbutils.TSE+"keytab refresh for pod %s failed: %v", pod.Name, err)
+							lastError = err
+						} else {
+							glog.V(5).Infof(krbutils.TSL+"keytab file refresh for pod %s completed", pod.Name)
+							// store which principals are still being used (for trimming of the keytab file later)
+							for p := range principals {
+								if !allNeededPrincipals[p] {
+									allNeededPrincipals[p] = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if lastError != nil {
+			glog.V(3).Infof(krbutils.TSL+"keytab distribution to containers failed, reporting last error %+v", lastError.Error())
+			response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
+		} else if trimKeytab {
+			if nodeHostname, err := os.Hostname(); err != nil {
+				glog.Errorf(krbutils.TSE+"could not retrieve hostname of the node, error: %+v", err)
+			} else {
+				// in addition, we need to protect user's keytab from being trimmed
+				allNeededPrincipals[s.krbManager.GetKeytabOwner()+"/"+nodeHostname+"@"+s.krbManager.GetKerberosRealm()] = true
+				glog.V(4).Infof(krbutils.TSL+"trimming will preserve principals: %+v", allNeededPrincipals)
+				if err := trimKeytabFile(keytabFile, allNeededPrincipals); err != nil {
+					glog.Errorf(krbutils.TSE+"error trimming the keytab file %+v", err)
+					response.WriteErrorString(http.StatusInternalServerError, lastError.Error())
+				} else {
+					glog.V(2).Infof(krbutils.TSL + "Ending Keytab refresh in REST servlet with success")
+				}
+			}
+		} else {
+			glog.V(4).Infof(krbutils.TSL + "skipping keytab trimming")
+		}
+	}
+}
+
+// Refresh keytab file for a specific Pod by extracting the relevant principals (as declared in the Pod's manifest) and
+// copying them into the container bindmount.
+func (s *Server) refreshKeytab(keytabFile string, pod *v1.Pod, userName, services, realm string) (map[string]bool, error) {
+	// extract part of the keytab file that contains data related to this Pod
+	// the only way to do it using ktutil is to make a copy of the master file
+	// and remove all of the entries that are not needed
+
+	defer lock.ExecTime(time.Now(), "refreshKeytab", keytabFile)
+
+	glog.V(4).Infof(krbutils.TSL+"starting keytab refresh for pod %s and userName %s", pod.Name, userName)
+
+	podDir := s.host.GetPodDir(pod.UID)
+
+	file, err := ioutil.TempFile(os.TempDir(), "k8s-keytab")
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"failed to create temp file: %v", err)
+		return nil, err
+	}
+	tmpFile := file.Name()
+	//      defer os.Remove(tmpFile)
+
+	fileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"failed to create output temp file: %v", err)
+		return nil, err
+	}
+	tmpFileOut := fileOut.Name()
+	//      defer os.Remove(tmpFileOut)
+
+	podAllClusters, err := s.host.GetAllPodKDCClusterNames(pod)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"error while getting service clusters for the POD %s during update, error: %v",
+			pod.Name, err)
+		return nil, err
+	}
+
+	//generate cartesian product of services and cluster names that represents all Kerberos principals this Pod needs
+	principals := map[string]bool{}
+	for clusterName, _ := range podAllClusters {
+		for _, srv := range strings.Split(services, ",") {
+			principals[srv+"/"+clusterName+"@"+realm] = true
+		}
+	}
+	glog.V(4).Infof(krbutils.TSL+"refreshing keytab for POD %s with clusterNames %+v podDir %s for user %s and services %+v principals %+v",
+		pod.Name, podAllClusters, podDir, userName, services, principals)
+	if out, err := krbutils.RunCommand("/bin/cp", "-f", keytabFile, tmpFile); err != nil {
+		glog.Errorf(krbutils.TSE+"error copying master keytab file to temporary file, error: %v, output: %s", err, string(out))
+		return nil, err
+	}
+
+	// extract the required principals
+	if err := extractKeytab(tmpFile, tmpFileOut, principals); err != nil {
+		glog.Errorf(krbutils.TSE+"extraction of principals from keytab %s for pod %s failed, error: %v", tmpFile, pod.Name, err)
+		return nil, err
+	}
+	if _, err := os.Stat(tmpFileOut); os.IsNotExist(err) {
+		// this POD does not yet have entry in the host keytab file, do not attempt to create a keytab
+		// this situation happens when the Pod is already in K8s data structures, but Kubelet did not
+		// invoke krb5_keytab for it yet.
+		glog.V(4).Infof(krbutils.TSL + "extraction produced the empty keytab, returning")
+		return principals, nil
+	}
+
+	startCopyAndOwnership := time.Now()
+	// create the Pod directory - we need to do it since the docker was not invoked yet
+	podKeytabDirectory := path.Join(podDir, krbutils.KeytabDirForPod)
+	cmd := exe.Command(
+		"mkdir",
+		"-p",
+		podKeytabDirectory)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to create Pod keytab directory: %s %v", out, err)
+	}
+
+	// copy the extracted part of the keytab to the container's keytab directory
+	podKeytabFile := path.Join(podDir, krbutils.KeytabDirForPod, userName)
+	cmd = exe.Command(
+		"/bin/cp",
+		"-f",
+		tmpFileOut,
+		podKeytabFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to copy the extracted keytab for user %s from tmpFile %s to destination %s: %s %v",
+			userName, tmpFileOut, podKeytabFile, out, err)
+		return nil, err
+	}
+
+	// modify the file permissions so the keytab file is readable only to the runAsUser declared in the manifest
+	runAsUser := pod.Spec.SecurityContext.RunAsUser
+	if runAsUser == nil {
+		glog.V(4).Infof(krbutils.TSL + "runAsUser not set, skipping keytab ownership change")
+		return principals, nil
+	}
+	owner := strconv.Itoa(int(*runAsUser)) + ":" + s.krbManager.GetTicketUserGroup()
+	glog.V(4).Infof(krbutils.TSL+"keytab file %s ownership will be changed to runAsUser %s", podKeytabFile, owner)
+	err = os.Chmod(podKeytabFile, 0600)
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"error changing keytab file %s permission to 0600, error: %v", podKeytabFile, err)
+		return nil, err
+	}
+	cmd = exe.Command("/bin/chown", owner, podKeytabFile)
+	_, err = cmd.CombinedOutput()
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"error changing owner of the keytab file %s to %v, error: %v", podKeytabFile, owner, err)
+		return nil, err
+	}
+	glog.V(4).Infof(krbutils.TSL+"keytab file %s ownership has been changed to runAsUser %s, copy and ownership exectime %s",
+		podKeytabFile, owner, time.Since(startCopyAndOwnership))
+	return principals, nil
+}
+
+// trim keytab file by removing principals that are not referenced by any Pod. The second argument
+// holds all principals that are needed, all others are removed.
+func trimKeytabFile(keytabFile string, allNeededPrincipals map[string]bool) error {
+	defer lock.ExecTime(time.Now(), "trimKeytabFile", keytabFile)
+
+	glog.V(4).Infof(krbutils.TSL+"will trim keytab file %s keeping principals %+v", keytabFile, allNeededPrincipals)
+	tmpFileOut, err := ioutil.TempFile(os.TempDir(), "k8s-keytab-out")
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"failed to create output temp file for trimming: %+v", err)
+		return err
+	}
+	tmpFileOutName := tmpFileOut.Name()
+	//      defer os.Remove(tmpFileOutName)
+
+	if err := extractKeytab(keytabFile, tmpFileOutName, allNeededPrincipals); err != nil {
+		glog.Errorf(krbutils.TSE+"failed to extract keytab for trimming: %+v", err)
+		return err
+	}
+	cmd := exe.Command(
+		"/bin/cp",
+		"-f",
+		tmpFileOutName,
+		keytabFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to copy the trimmed keytab file %s to destination %s, output %s, err %+v",
+			tmpFileOut, keytabFile, out, err)
+		return err
+	} else {
+		glog.V(4).Infof(krbutils.TSL+"keytab has been trimmed at %s, output %s", keytabFile, out)
+		return nil
+	}
+}
+
+func extractKeytab(keytabFilename, keytabFilenameOut string, principals map[string]bool) error {
+	defer lock.ExecTime(time.Now(), "extractKeytab", keytabFilename)
+
+	// list all entries in the keytab file
+	outb, errb, err := krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{"rkt " + keytabFilename + "\nlist\nq\n"}, []string{})
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"exec with pipe failed, error %v", err)
+		return err
+	}
+	if errb.Len() > 0 {
+		glog.Errorf(krbutils.TSE+"unable to list keys in keytab file %s, output %v, error %v", keytabFilename, outb, errb)
+		return errors.New(outb.String() + " " + errb.String())
+	}
+
+	glog.V(4).Infof(krbutils.TSL + "preparing keytab extraction string")
+	re := regexp.MustCompile("  +")
+	keyArray := strings.Split(string(re.ReplaceAll(bytes.TrimSpace(outb.Bytes()), []byte(" "))), "\n")
+	toRemove := "rkt " + keytabFilename + "\n"
+	for c := len(keyArray) - 1; c >= 0; c-- {
+		key := strings.Trim(keyArray[c], " ")
+		// skip header outputed by the ktutil
+		if c < 4 {
+			continue
+		}
+		items := strings.Split(key, " ")
+		// skip irrelevant parts of the klist output
+		if len(items) != 3 {
+			continue
+		}
+		if !principals[items[2]] {
+			toRemove = toRemove + "delent " + items[0] + "\n"
+		}
+	}
+	toRemove = toRemove + "wkt " + keytabFilenameOut + "\nq\n"
+	glog.V(4).Infof(krbutils.TSL + "keytab extraction string to be executed has been prepared")
+
+	// need to remove actual tmpfile since ktutil can not write to an existing empty file
+	// (if attempted, an incorrect file format error is raised)
+	if err := os.Remove(keytabFilenameOut); err != nil {
+		glog.Errorf(krbutils.TSE+"unable to remove  ORtempfile %s, error %v", keytabFilenameOut, err)
+		return err
+	}
+
+	// extract the keys
+	outb, errb, err = krbutils.ExecWithPipe("printf", krbutils.KtutilPath, []string{toRemove}, []string{})
+	if err != nil {
+		glog.Errorf(krbutils.TSE+"exec with pipe failed while extracting the keys, error %v", err)
+		return err
+	}
+	if errb.Len() > 0 {
+		glog.Errorf(krbutils.TSE+"unable to remove keys from keytab file %s and write to keytab file %s, output %v, error %v",
+			keytabFilename, keytabFilenameOut, outb.String(), errb.String())
+		return errors.New(outb.String() + " " + errb.String())
+	} else {
+		glog.V(4).Infof(krbutils.TSL+"ktutil returned with, %s", outb.String())
+	}
+	return nil
 }
 
 // getPods returns a list of pods bound to the Kubelet and their spec.

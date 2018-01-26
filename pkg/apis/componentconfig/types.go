@@ -387,6 +387,8 @@ type KubeControllerManagerConfiguration struct {
 	EnableContentionProfiling bool
 	// clusterName is the instance prefix for the cluster.
 	ClusterName string
+	// domain name of services in the cluster
+	ClusterDomain string
 	// clusterCIDR is CIDR Range for Pods in cluster.
 	ClusterCIDR string
 	// serviceCIDR is CIDR Range for Services in cluster.

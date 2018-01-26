@@ -40,6 +40,7 @@ import (
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	"k8s.io/kubernetes/pkg/util/metrics"
 
 	"github.com/golang/glog"
@@ -74,7 +75,7 @@ var (
 
 // NewEndpointController returns a new *EndpointController.
 func NewEndpointController(podInformer coreinformers.PodInformer, serviceInformer coreinformers.ServiceInformer,
-	endpointsInformer coreinformers.EndpointsInformer, client clientset.Interface) *EndpointController {
+	endpointsInformer coreinformers.EndpointsInformer, client clientset.Interface, clusterDomain string) *EndpointController {
 	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
 		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_controller", client.Core().RESTClient().GetRateLimiter())
 	}
@@ -82,6 +83,7 @@ func NewEndpointController(podInformer coreinformers.PodInformer, serviceInforme
 		client:           client,
 		queue:            workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "endpoint"),
 		workerLoopPeriod: time.Second,
+		clusterDomain:    clusterDomain,
 	}
 
 	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -104,6 +106,12 @@ func NewEndpointController(podInformer coreinformers.PodInformer, serviceInforme
 
 	e.endpointsLister = endpointsInformer.Lister()
 	e.endpointsSynced = endpointsInformer.Informer().HasSynced
+
+	// create Kerberos manager instance
+	// no locking in endpoint manager, so no lock config passed
+	e.krbManager, _ = krbutils.NewKerberosManager(
+		krbutils.KrbManagerParameters{},
+	)
 
 	return e
 }
@@ -142,6 +150,11 @@ type EndpointController struct {
 
 	// workerLoopPeriod is the time between worker runs. The workers process the queue of service and pod changes.
 	workerLoopPeriod time.Duration
+
+	// DNS name of the domain of the cluster
+	clusterDomain string
+	// Kerberos manager
+	krbManager krbutils.KrbManager
 }
 
 // Runs e; will not return until stopCh is closed. workers determines how many
@@ -394,6 +407,13 @@ func (e *EndpointController) syncService(key string) error {
 	}
 	service, err := e.serviceLister.Services(namespace).Get(name)
 	if err != nil {
+		kdcClusterName := name + "." + namespace + ".svc." + e.clusterDomain
+		glog.V(4).Infof(krbutils.TSL+"Service %s/%s deleted, will empty KDC cluster %s",
+			namespace, name, kdcClusterName)
+		// TODO: this should also be serialized - leaving for now given majority of concurrency happens in the kubelets
+		if errClean := e.krbManager.CleanServiceInKDC(kdcClusterName); errClean != nil {
+			glog.Errorf(krbutils.TSE+"error while cleaning KDC service cluster %s, error %v", kdcClusterName, errClean)
+		}
 		// Delete the corresponding endpoint, as the service has been deleted.
 		// TODO: Please note that this will delete an endpoint when a
 		// service is deleted. However, if we're down at the time when

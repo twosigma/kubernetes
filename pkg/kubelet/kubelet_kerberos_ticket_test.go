@@ -9,7 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/api/core/v1"
+	api2 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/kerberosmanager"
 	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -172,7 +173,7 @@ func prepareKubelet(t *testing.T) *Kubelet {
 
 func prepareTestPod(name, namespace, localKrb, userPrefixed, services, ticketContent, runAsUser string, secContextUserId *int64) api.Pod {
 	return api.Pod{
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: api2.ObjectMeta{
 			UID:       "uuid-of-pod",
 			Namespace: namespace,
 			Name:      name,
