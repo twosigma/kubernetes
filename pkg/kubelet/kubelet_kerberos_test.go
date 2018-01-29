@@ -278,7 +278,7 @@ func TestMakeTSMounts(t *testing.T) {
 	testMakeTSMounts_certs(t)
 
 	// test custom resolv.conf creation
-	//testMakeTSResolveConf(t)
+	testMakeTSResolveConf(t)
 
 	// test pod update
 	testPodUpdateKerberos(t)

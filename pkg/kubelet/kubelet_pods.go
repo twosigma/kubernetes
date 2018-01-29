@@ -227,7 +227,20 @@ func makeMounts(pod *v1.Pod, podDir string, container *v1.Container, hostName, h
 	}
 	if mountEtcHostsFile {
 		hostAliases := pod.Spec.HostAliases
-		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain, hostAliases, pod.Spec.HostNetwork)
+		// check if pod has prefixed hostname annotation
+		prefix := ""
+		if tsuserprefixedhostname, ok := pod.ObjectMeta.Annotations[krbutils.TSPrefixedHostnameAnnotation]; ok && tsuserprefixedhostname == "true" {
+			if runAsUsername, ok1 := pod.ObjectMeta.Annotations[krbutils.TSRunAsUserAnnotation]; ok1 {
+				prefix = runAsUsername
+			}
+		}
+		var doReverseHostsOrder bool
+		if reverseHostsOrder, ok := pod.ObjectMeta.Annotations[krbutils.TSReverseHostsOrder]; ok && reverseHostsOrder == "true" {
+			doReverseHostsOrder = true
+		} else {
+			doReverseHostsOrder = false
+		}
+		hostsMount, err := makeHostsMount(podDir, podIP, hostName, hostDomain, hostAliases, pod.Spec.HostNetwork, prefix, doReverseHostsOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -258,9 +271,9 @@ func translateMountPropagation(mountMode *v1.MountPropagationMode) (runtimeapi.M
 
 // makeHostsMount makes the mountpoint for the hosts file that the containers
 // in a pod are injected with.
-func makeHostsMount(podDir, podIP, hostName, hostDomainName string, hostAliases []v1.HostAlias, useHostNetwork bool) (*kubecontainer.Mount, error) {
+func makeHostsMount(podDir, podIP, hostName, hostDomainName string, hostAliases []v1.HostAlias, useHostNetwork bool, prefix string, doReverseHostsOrder bool) (*kubecontainer.Mount, error) {
 	hostsFilePath := path.Join(podDir, "etc-hosts")
-	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName, hostAliases, useHostNetwork); err != nil {
+	if err := ensureHostsFile(hostsFilePath, podIP, hostName, hostDomainName, hostAliases, useHostNetwork, prefix, doReverseHostsOrder); err != nil {
 		return nil, err
 	}
 	return &kubecontainer.Mount{
@@ -274,7 +287,7 @@ func makeHostsMount(podDir, podIP, hostName, hostDomainName string, hostAliases 
 
 // ensureHostsFile ensures that the given host file has an up-to-date ip, host
 // name, and domain name.
-func ensureHostsFile(fileName, hostIP, hostName, hostDomainName string, hostAliases []v1.HostAlias, useHostNetwork bool) error {
+func ensureHostsFile(fileName, hostIP, hostName, hostDomainName string, hostAliases []v1.HostAlias, useHostNetwork bool, prefix string, doReverseHostsOrder bool) error {
 	var hostsFileContent []byte
 	var err error
 
@@ -288,7 +301,7 @@ func ensureHostsFile(fileName, hostIP, hostName, hostDomainName string, hostAlia
 		}
 	} else {
 		// if Pod is not using host network, create a managed hosts file with Pod IP and other information.
-		hostsFileContent = managedHostsFileContent(hostIP, hostName, hostDomainName, hostAliases)
+		hostsFileContent = managedHostsFileContent(hostIP, hostName, hostDomainName, hostAliases, prefix, doReverseHostsOrder)
 	}
 
 	return ioutil.WriteFile(fileName, hostsFileContent, 0644)
@@ -306,7 +319,7 @@ func nodeHostsFileContent(hostsFilePath string, hostAliases []v1.HostAlias) ([]b
 
 // managedHostsFileContent generates the content of the managed etc hosts based on Pod IP and other
 // information.
-func managedHostsFileContent(hostIP, hostName, hostDomainName string, hostAliases []v1.HostAlias) []byte {
+func managedHostsFileContent(hostIP, hostName, hostDomainName string, hostAliases []v1.HostAlias, prefix string, doReverseHostsOrder bool) []byte {
 	var buffer bytes.Buffer
 	buffer.WriteString("# Kubernetes-managed hosts file.\n")
 	buffer.WriteString("127.0.0.1\tlocalhost\n")                      // ipv4 localhost
@@ -316,7 +329,17 @@ func managedHostsFileContent(hostIP, hostName, hostDomainName string, hostAliase
 	buffer.WriteString("fe00::1\tip6-allnodes\n")
 	buffer.WriteString("fe00::2\tip6-allrouters\n")
 	if len(hostDomainName) > 0 {
-		buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s\n", hostIP, hostName, hostDomainName, hostName))
+		if prefix == "" {
+			buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s\n", hostIP, hostName, hostDomainName, hostName))
+		} else {
+			if doReverseHostsOrder {
+				buffer.WriteString(fmt.Sprintf("%s\t%s.%s\t%s.%s.%s\t%s\n",
+					hostIP, hostName, hostDomainName, prefix, hostName, hostDomainName, hostName))
+			} else {
+				buffer.WriteString(fmt.Sprintf("%s\t%s.%s.%s\t%s.%s\t%s\n",
+					hostIP, prefix, hostName, hostDomainName, hostName, hostDomainName, hostName))
+			}
+		}
 	} else {
 		buffer.WriteString(fmt.Sprintf("%s\t%s\n", hostIP, hostName))
 	}
@@ -386,7 +409,8 @@ func (kl *Kubelet) GeneratePodHostNameAndDomain(pod *v1.Pod) (string, string, er
 		}
 		hostDomain = fmt.Sprintf("%s.%s.svc.%s", pod.Spec.Subdomain, pod.Namespace, clusterDomain)
 	}
-
+	// override the hostDomain of the Pod to match the name <pod.Name>.<namespace>.pods.<cluster>
+	hostDomain = krbutils.GetPodDomainName(pod, clusterDomain)
 	return hostname, hostDomain, nil
 }
 
@@ -396,6 +420,8 @@ func (kl *Kubelet) GetPodCgroupParent(pod *v1.Pod) string {
 	_, cgroupParent := pcm.GetPodContainerName(pod)
 	return cgroupParent
 }
+
+const hostnameMaxLen = 63
 
 // GenerateRunContainerOptions generates the RunContainerOptions, which can be used by
 // the container runtime to set parameters for launching a container.
@@ -412,7 +438,15 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 	if err != nil {
 		return nil, false, err
 	}
-	opts.Hostname = hostname
+	if kl.kubeletConfiguration.TSHostnameFqdn {
+		opts.Hostname = hostname + "." + hostDomainName
+	} else {
+		opts.Hostname = hostname
+	}
+
+	if len(opts.Hostname) > hostnameMaxLen && !pod.Spec.HostNetwork {
+		return nil, false, fmt.Errorf("Container hostname " + opts.Hostname + " is too long (63 characters limit).")
+	}
 	podName := volumehelper.GetUniquePodName(pod)
 	volumes := kl.volumeManager.GetMountedVolumesForPod(podName)
 
@@ -431,8 +465,7 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 	opts.Mounts = append(opts.Mounts, mounts...)
 
 	// create all required TS mounts (for Kerberos ticket, keytabs, certs, and custom resolve.conf)
-	//	if tsMounts, err := kl.makeTSMounts(pod, podIP, kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
-	if tsMounts, err := kl.makeTSMounts(pod, podIP, false); err != nil {
+	if tsMounts, err := kl.makeTSMounts(pod, podIP, kl.kubeletConfiguration.TSCustomResolvConf); err != nil {
 		glog.Errorf(krbutils.TSE+"unable to create TS mounts for Pod %s, error: %v", pod.Name, err)
 		return nil, false, err
 	} else {

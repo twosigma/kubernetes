@@ -108,6 +108,32 @@ func (kl *Kubelet) makeTSMounts(pod *api.Pod, podIP string, customResolvConf boo
 		}
 	}
 
+	// check if Pod declares /etc/resolv.conf bindmount. If it does not, create the custom resolv.conf
+	skipResolvConf := false
+	for _, v := range pod.Spec.Volumes {
+		if v.VolumeSource.HostPath != nil {
+			if v.VolumeSource.HostPath.Path == "/etc/k8s-resolv.conf" {
+				skipResolvConf = true
+				glog.V(5).Infof(krbutils.TSL+"Pod declares resolv.conf, skipping the custom resolv.conf %s", pod.Name)
+			}
+		}
+	}
+
+	// create TS specific /etc/resolv.conf
+	if customResolvConf && !skipResolvConf {
+		glog.V(5).Infof(krbutils.TSL+"creating custom resolv.conf for Pod %s", pod.Name)
+		resolveMount, err := kl.makeResolveMount(pod)
+		if err != nil {
+			glog.Errorf(krbutils.TSE+"unable to create resolve mount: %v", err)
+			return nil, err
+		} else {
+			tsMounts = append(tsMounts, *resolveMount)
+			glog.V(5).Infof(krbutils.TSL+"created custom resolv.conf for Pod %s", pod.Name)
+		}
+	} else {
+		glog.V(5).Infof(krbutils.TSL+"not creating custom resolv.conf for Pod %s", pod.Name)
+	}
+
 	return tsMounts, nil
 }
 

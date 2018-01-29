@@ -298,6 +298,8 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_kubeletconfig_KubeletConfigura
 	out.KubeReservedCgroup = in.KubeReservedCgroup
 	out.EnforceNodeAllocatable = *(*[]string)(unsafe.Pointer(&in.EnforceNodeAllocatable))
 	out.ExperimentalNodeAllocatableIgnoreEvictionThreshold = in.ExperimentalNodeAllocatableIgnoreEvictionThreshold
+	out.TSHostnameFqdn = in.TSHostnameFqdn
+	out.TSCustomResolvConf = in.TSCustomResolvConf
 	out.TSLockKerberos = in.TSLockKerberos
 	out.TSLockKrb5KeytabOnly = in.TSLockKrb5KeytabOnly
 	out.TSLockEtcdServerList = *(*[]string)(unsafe.Pointer(&in.TSLockEtcdServerList))
@@ -469,6 +471,8 @@ func autoConvert_kubeletconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigura
 	out.KubeReservedCgroup = in.KubeReservedCgroup
 	out.EnforceNodeAllocatable = *(*[]string)(unsafe.Pointer(&in.EnforceNodeAllocatable))
 	out.ExperimentalNodeAllocatableIgnoreEvictionThreshold = in.ExperimentalNodeAllocatableIgnoreEvictionThreshold
+	out.TSHostnameFqdn = in.TSHostnameFqdn
+	out.TSCustomResolvConf = in.TSCustomResolvConf
 	out.TSLockKerberos = in.TSLockKerberos
 	out.TSLockKrb5KeytabOnly = in.TSLockKrb5KeytabOnly
 	out.TSLockEtcdServerList = *(*[]string)(unsafe.Pointer(&in.TSLockEtcdServerList))

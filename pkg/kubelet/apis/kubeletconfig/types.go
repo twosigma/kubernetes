@@ -370,7 +370,10 @@ type KubeletConfiguration struct {
 	// Refer to [Node Allocatable](https://git.k8s.io/community/contributors/design-proposals/node-allocatable.md) doc for more information.
 	ExperimentalNodeAllocatableIgnoreEvictionThreshold bool
 
-	// TS mod
+	// This flag, if set, makes kubelet set Pod's hostname to its fqdn
+	TSHostnameFqdn bool `json:"TSHostnameFqdn,omitempty"`
+	// This flag, if set, makes kubelet generate custom /etc/resolv.conf file
+	TSCustomResolvConf bool `json:"TSCustomResolvConf,omitempty"`
 	// TS Kerberos locking: If true the Kubelet will serilalize Kerberos operations (across entire cluster, if enabled on all Kubelets).
 	TSLockKerberos bool `json:"TSLockKerberos,omitempty"`
 	// TS Kerberos locking: lock only krb5_keytab operation and not the other krb5_* operations
