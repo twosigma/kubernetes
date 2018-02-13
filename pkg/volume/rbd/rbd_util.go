@@ -31,6 +31,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/glog"
@@ -46,9 +47,27 @@ const (
 	rbdCmdErr       = "executable file not found in $PATH"
 )
 
+var rbdAttachMutex = &sync.Mutex{}
+
+func imageSnapshotMatched(pool, image, output string) bool {
+	if strings.Contains(image, "@") {
+		return output == pool+"\n"+strings.Replace(image, "@", "\n", 1)+"\n"
+	} else {
+		return output == pool+"\n"+image+"\n-\n"
+	}
+}
+
 // search /sys/bus for rbd device that matches given pool and image
-func getDevFromImageAndPool(pool, image string) (string, bool) {
+func getDevFromImageAndPool(b rbdMounter) (string, bool) {
+	pool, image, readOnly := b.Pool, b.Image, b.rbd.ReadOnly
 	// /sys/bus/rbd/devices/X/name and /sys/bus/rbd/devices/X/pool
+	// if the rbd volume is readOnly, then the device must be present as ro and not mounted
+	// because there could be other pods mounting the same snapshot
+
+	if readOnly {
+		glog.V(1).Infof("rbd: attaching %s/%s as read-only", pool, image)
+	}
+
 	sys_path := "/sys/bus/rbd/devices"
 	if dirs, err := ioutil.ReadDir(sys_path); err == nil {
 		for _, f := range dirs {
@@ -77,9 +96,20 @@ func getDevFromImageAndPool(pool, image string) (string, bool) {
 				glog.V(4).Infof("Device %s is not %q: %q", name, image, string(imgBytes))
 				continue
 			}
+			snapFile := path.Join(sys_path, name, "current_snap")
+			snapBytes, err := ioutil.ReadFile(snapFile)
+			if err != nil {
+				glog.V(4).Infof("Error reading %s: %v", snapFile, err)
+				continue
+			}
+			if !imageSnapshotMatched(pool, image, string(snapBytes)) {
+				glog.V(4).Infof("Device snapshot does not match")
+				continue
+			}
 			// found a match, check if device exists
 			devicePath := "/dev/rbd" + name
 			if _, err := os.Lstat(devicePath); err == nil {
+				glog.V(1).Infof("settled on %s as device", devicePath)
 				return devicePath, true
 			}
 		}
@@ -88,9 +118,9 @@ func getDevFromImageAndPool(pool, image string) (string, bool) {
 }
 
 // stat a path, if not exists, retry maxRetries times
-func waitForPath(pool, image string, maxRetries int) (string, bool) {
+func waitForPath(b rbdMounter, maxRetries int) (string, bool) {
 	for i := 0; i < maxRetries; i++ {
-		devicePath, found := getDevFromImageAndPool(pool, image)
+		devicePath, found := getDevFromImageAndPool(b)
 		if found {
 			return devicePath, true
 		}
@@ -261,6 +291,11 @@ func (util *RBDUtil) defencing(c rbdUnmounter) error {
 }
 
 func (util *RBDUtil) AttachDisk(b rbdMounter) error {
+	rbdAttachMutex.Lock()
+	glog.V(1).Infof("enter critical section")
+	defer rbdAttachMutex.Unlock()
+	defer glog.V(1).Infof("leaving critical section")
+
 	var err error
 	var output []byte
 
@@ -278,8 +313,10 @@ func (util *RBDUtil) AttachDisk(b rbdMounter) error {
 		return fmt.Errorf("rbd: failed to mkdir %s, error", globalPDPath)
 	}
 
-	devicePath, found := waitForPath(b.Pool, b.Image, 1)
+	glog.V(1).Infof("perform first waitForPath(b,1)")
+	devicePath, found := waitForPath(b, 1)
 	if !found {
+		glog.V(1).Infof("not found")
 		_, err = b.exec.Run("modprobe", "rbd")
 		if err != nil {
 			glog.Warningf("rbd: failed to load rbd kernel module:%v", err)
@@ -319,7 +356,9 @@ func (util *RBDUtil) AttachDisk(b rbdMounter) error {
 		if err != nil {
 			return fmt.Errorf("rbd: map failed %v %s", err, string(output))
 		}
-		devicePath, found = waitForPath(b.Pool, b.Image, 10)
+
+		glog.V(1).Infof("do second waitForPath(b, 10)")
+		devicePath, found = waitForPath(b, 10)
 		if !found {
 			return errors.New("Could not map image: Timeout after 10s")
 		}
@@ -327,6 +366,7 @@ func (util *RBDUtil) AttachDisk(b rbdMounter) error {
 	}
 
 	// mount it
+	glog.V(1).Infof("mount it!!")
 	if err = b.mounter.FormatAndMount(devicePath, globalPDPath, b.fsType, nil); err != nil {
 		err = fmt.Errorf("rbd: failed to mount rbd volume %s [%s] to %s, error %v", devicePath, b.fsType, globalPDPath, err)
 	}
