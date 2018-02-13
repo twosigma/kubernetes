@@ -143,6 +143,13 @@ func generateMountBindings(mounts []*runtimeapi.Mount) []string {
 		if m.SelinuxRelabel {
 			attrs = append(attrs, "Z")
 		}
+
+		// force empty-dir bindmounts to have shared propagation
+		if strings.Contains(m.GetHostPath(), "empty-dir") &&
+			m.Propagation != runtimeapi.MountPropagation_PROPAGATION_BIDIRECTIONAL {
+			m.Propagation = runtimeapi.MountPropagation_PROPAGATION_BIDIRECTIONAL
+		}
+
 		switch m.Propagation {
 		case runtimeapi.MountPropagation_PROPAGATION_PRIVATE:
 			// noop, private is default
