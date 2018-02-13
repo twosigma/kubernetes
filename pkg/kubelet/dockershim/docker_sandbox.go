@@ -337,6 +337,18 @@ func (ds *dockerService) getIP(podSandboxID string, sandbox *dockertypes.Contain
 		return sandbox.NetworkSettings.GlobalIPv6Address
 	}
 
+	// TS look for IPs from the list of networks
+	if sandbox.NetworkSettings.Networks != nil {
+		for _, info := range sandbox.NetworkSettings.Networks {
+			if info.IPAddress != "" {
+				return info.IPAddress
+			}
+			if info.GlobalIPv6Address != "" {
+				return info.GlobalIPv6Address
+			}
+		}
+	}
+
 	// If all else fails, warn but don't return an error, as pod status
 	// should generally not return anything except fatal errors
 	// FIXME: handle network errors by restarting the pod somehow?

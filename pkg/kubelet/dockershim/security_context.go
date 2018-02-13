@@ -171,7 +171,7 @@ func modifyHostNetworkOptionForSandbox(hostNetwork bool, network *knetwork.Plugi
 	case "kubenet":
 		hc.NetworkMode = "none"
 	default:
-		hc.NetworkMode = "default"
+		hc.NetworkMode = "pub-net"
 	}
 }
 
