@@ -15,6 +15,7 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
+	"k8s.io/kubernetes/pkg/api"
 	lock "k8s.io/kubernetes/pkg/util/lock"
 )
 
@@ -35,8 +36,35 @@ func GetRunAsUsername(pod *v1.Pod) (string, error) {
 		return "", errors.New("runAsUser is not set for Pod " + pod.Namespace + "/" + pod.Name)
 	}
 
+	return lookupUserId(int(*runAsUser))
+}
+
+// Legacy version of the GetRunAsUsername() that operates on pod object from earlier version of the API
+// It is needed for admission controllers which still operate based on that API.
+// TODO: Is there a conversion routine between the two?
+func GetRunAsUsername_Legacy(pod *api.Pod) (string, error) {
+	// get user ID from pod security context
+	if pod.Spec.SecurityContext == nil {
+		return "", errors.New("security context not defined for Pod " + pod.Namespace + "/" + pod.Name)
+	}
+	runAsUser := pod.Spec.SecurityContext.RunAsUser
+	if runAsUser == nil {
+		return "", errors.New("runAsUser is not set for Pod " + pod.Namespace + "/" + pod.Name)
+	}
+
+	return lookupUserId(int(*runAsUser))
+}
+
+// lookupUserId() finds the user name based on the user ID
+//
+// Parameters:
+// - runAsUser - user identifier
+//
+// Return:
+// - username string or error if user with this ID does not exist
+func lookupUserId(runAsUser int) (string, error) {
 	// attempt to lookup ID
-	uid := strconv.Itoa(int(*runAsUser))
+	uid := strconv.Itoa(runAsUser)
 	if user, err := user.LookupId(uid); err != nil {
 		// LookupId failed, fall back to getent
 		out, e2 := RunCommand("/usr/bin/getent", "passwd", uid)

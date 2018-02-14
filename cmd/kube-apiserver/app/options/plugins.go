@@ -51,6 +51,7 @@ import (
 	"k8s.io/kubernetes/plugin/pkg/admission/securitycontext/scdeny"
 	"k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/plugin/pkg/admission/storageclass/setdefault"
+	"k8s.io/kubernetes/plugin/pkg/admission/tspolicy/enforcerunas"
 	"k8s.io/kubernetes/plugin/pkg/admission/webhook"
 )
 
@@ -83,4 +84,5 @@ func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	setdefault.Register(plugins)
 	webhook.Register(plugins)
 	resize.Register(plugins)
+	enforcerunasuser.Register(plugins)
 }
