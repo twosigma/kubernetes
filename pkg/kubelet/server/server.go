@@ -650,6 +650,10 @@ func (s *Server) refreshKeytabs(request *restful.Request, response *restful.Resp
 			} else {
 				// in addition, we need to protect user's keytab from being trimmed
 				allNeededPrincipals[s.krbManager.GetKeytabOwner()+"/"+nodeHostname+"@"+s.krbManager.GetKerberosRealm()] = true
+				// hack to protect special principals
+				// TODO: needs to be refactored together with moving Krb function to device driver/daemon set
+				allNeededPrincipals["HTTP/containers-qa.app.twosigma.com@"+s.krbManager.GetKerberosRealm()] = true
+				allNeededPrincipals["HTTP/containers.app.twosigma.com@"+s.krbManager.GetKerberosRealm()] = true
 				glog.V(4).Infof(krbutils.TSL+"trimming will preserve principals: %+v", allNeededPrincipals)
 				if err := trimKeytabFile(keytabFile, allNeededPrincipals); err != nil {
 					glog.Errorf(krbutils.TSE+"error trimming the keytab file %+v", err)
