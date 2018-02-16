@@ -31,6 +31,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/kubernetes/pkg/controller"
 	deploymentutil "k8s.io/kubernetes/pkg/controller/deployment/util"
+	krbutils "k8s.io/kubernetes/pkg/kerberosmanager"
 	labelsutil "k8s.io/kubernetes/pkg/util/labels"
 	"k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/util/rand"
 )
@@ -292,11 +293,17 @@ func (dc *DeploymentController) getNewReplicaSet(d *extensions.Deployment, rsLis
 	// Add podTemplateHash label to selector.
 	newRSSelector := labelsutil.CloneSelectorAndAddLabel(d.Spec.Selector, extensions.DefaultDeploymentUniqueLabelKey, podTemplateSpecHash)
 
+	// TS mod - limit the length of the RS name as to be able to fit in 64 bytes limit of hostname while setting it to FQDN
+	rsName := rand.SafeEncodeString(podTemplateSpecHash)
+	if len(rsName) > krbutils.RSMaxNameLength {
+		rsName = rsName[:krbutils.RSMaxNameLength]
+	}
+
 	// Create new ReplicaSet
 	newRS := extensions.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			// Make the name deterministic, to ensure idempotence
-			Name:            d.Name + "-" + rand.SafeEncodeString(podTemplateSpecHash),
+			Name:            d.Name + "-" + rsName,
 			Namespace:       d.Namespace,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(d, controllerKind)},
 		},
