@@ -49,14 +49,6 @@ const (
 
 var rbdAttachMutex = &sync.Mutex{}
 
-func imageSnapshotMatched(pool, image, output string) bool {
-	if strings.Contains(image, "@") {
-		return output == pool+"\n"+strings.Replace(image, "@", "\n", 1)+"\n"
-	} else {
-		return output == pool+"\n"+image+"\n-\n"
-	}
-}
-
 // search /sys/bus for rbd device that matches given pool and image
 func getDevFromImageAndPool(b rbdMounter) (string, bool) {
 	pool, image, readOnly := b.Pool, b.Image, b.rbd.ReadOnly
@@ -92,20 +84,28 @@ func getDevFromImageAndPool(b rbdMounter) (string, bool) {
 				glog.V(4).Infof("Error reading %s: %v", imgFile, err)
 				continue
 			}
-			if strings.TrimSpace(string(imgBytes)) != image {
-				glog.V(4).Infof("Device %s is not %q: %q", name, image, string(imgBytes))
-				continue
+
+			if strings.Contains(image, "@") {
+				snapFile := path.Join(sys_path, name, "current_snap")
+				snapBytes, err := ioutil.ReadFile(snapFile)
+				if err != nil {
+					glog.V(4).Infof("Error reading %s: %v", snapFile, err)
+					continue
+				}
+				if image != strings.TrimSpace(string(imgBytes))+"@"+strings.TrimSpace(string(snapBytes)) {
+					glog.V(4).Infof("Device %s is not %q: %q with snapshot %q", name, image, string(imgBytes), string(snapBytes))
+					continue
+				} else {
+					glog.V(4).Infof("Found match for device %s - %q: %q with snapshot %q", name,
+						image, string(imgBytes), string(snapBytes))
+				}
+			} else {
+				if strings.TrimSpace(string(imgBytes)) != image {
+					glog.V(4).Infof("Device %s is not %q: %q", name, image, string(imgBytes))
+					continue
+				}
 			}
-			snapFile := path.Join(sys_path, name, "current_snap")
-			snapBytes, err := ioutil.ReadFile(snapFile)
-			if err != nil {
-				glog.V(4).Infof("Error reading %s: %v", snapFile, err)
-				continue
-			}
-			if !imageSnapshotMatched(pool, image, string(snapBytes)) {
-				glog.V(4).Infof("Device snapshot does not match")
-				continue
-			}
+
 			// found a match, check if device exists
 			devicePath := "/dev/rbd" + name
 			if _, err := os.Lstat(devicePath); err == nil {
