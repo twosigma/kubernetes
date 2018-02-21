@@ -88,11 +88,11 @@ func (m *kubeGenericRuntimeManager) generatePodSandboxConfig(pod *v1.Pod, attemp
 
 	if !kubecontainer.IsHostNetworkPod(pod) {
 		// TODO: Add domain support in new runtime interface
-		hostname, _, err := m.runtimeHelper.GeneratePodHostNameAndDomain(pod)
+		hostname, hostDomain, err := m.runtimeHelper.GeneratePodHostNameAndDomain(pod)
 		if err != nil {
 			return nil, err
 		}
-		podSandboxConfig.Hostname = hostname
+		podSandboxConfig.Hostname = hostname + "." + hostDomain
 	}
 
 	logDir := buildPodLogsDirectory(pod.UID)

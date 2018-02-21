@@ -438,11 +438,6 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 	if err != nil {
 		return nil, false, err
 	}
-	if kl.kubeletConfiguration.TSHostnameFqdn {
-		opts.Hostname = hostname + "." + hostDomainName
-	} else {
-		opts.Hostname = hostname
-	}
 
 	if len(opts.Hostname) > hostnameMaxLen && !pod.Spec.HostNetwork {
 		return nil, false, fmt.Errorf("Container hostname " + opts.Hostname + " is too long (63 characters limit).")
