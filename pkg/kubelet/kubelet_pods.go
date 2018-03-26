@@ -411,6 +411,11 @@ func (kl *Kubelet) GeneratePodHostNameAndDomain(pod *v1.Pod) (string, string, er
 	}
 	// override the hostDomain of the Pod to match the name <pod.Name>.<namespace>.pods.<cluster>
 	hostDomain = krbutils.GetPodDomainName(pod, clusterDomain)
+	// check if the length is within limit
+	if len(hostname+"."+hostDomain) > hostnameMaxLen && !pod.Spec.HostNetwork {
+		kl.recorder.Eventf(pod, v1.EventTypeWarning, "Pod FQDN is too long (has to be shorter than 64 chars)", "name %s is %d characters long.", hostname+"."+hostDomain, len(hostname+"."+hostDomain))
+		return "", "", fmt.Errorf("Container hostname " + hostname + "." + hostDomain + " is too long (63 characters limit).")
+	}
 	return hostname, hostDomain, nil
 }
 
