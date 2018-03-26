@@ -366,8 +366,14 @@ func (util *RBDUtil) AttachDisk(b rbdMounter) error {
 	}
 
 	// mount it
-	glog.V(1).Infof("mount it!!")
-	if err = b.mounter.FormatAndMount(devicePath, globalPDPath, b.fsType, nil); err != nil {
+	glog.V(3).Infof("TSLOG: mounting rbd image %s [%s] to %s", devicePath, b.fsType, globalPDPath)
+	var options []string
+	if b.fsType == "ext4" && b.ReadOnly {
+		glog.V(3).Infof("TSLOG: fstype is ext4 and disk is ro, mounting with ro,noload to avoid errors")
+		options = append(options, "ro,noload")
+	}
+
+	if err = b.mounter.FormatAndMount(devicePath, globalPDPath, b.fsType, options); err != nil {
 		err = fmt.Errorf("rbd: failed to mount rbd volume %s [%s] to %s, error %v", devicePath, b.fsType, globalPDPath, err)
 	}
 	glog.V(3).Infof("rbd: successfully mount image %s/%s at %s", b.Pool, b.Image, globalPDPath)
