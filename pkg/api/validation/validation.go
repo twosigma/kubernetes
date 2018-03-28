@@ -1936,17 +1936,22 @@ func ValidateVolumeMounts(mounts []api.VolumeMount, volumes sets.String, contain
 		if mountpoints.Has(mnt.MountPath) {
 			allErrs = append(allErrs, field.Invalid(idxPath.Child("mountPath"), mnt.MountPath, "must be unique"))
 		}
-		// add check for path overlap
-		for _, apath := range mountpoints.List() {
-			rel, err := filepath.Rel(mnt.MountPath, apath)
-			if err != nil {
-				// returns error if target path can't be made relative to basepath, which means no conflict
-				continue
+		// add check for path overlap, excluding containers named jnlp
+		glog.V(5).Infof("TSLOG: checking overlap %s", container.Name)
+		if container.Name != "jnlp" {
+			for _, apath := range mountpoints.List() {
+				rel, err := filepath.Rel(mnt.MountPath, apath)
+				if err != nil {
+					// returns error if target path can't be made relative to basepath, which means no conflict
+					continue
+				}
+				if !strings.Contains(rel, "../") {
+					errorString := fmt.Sprintf("conflicts with volumeMount:'%v', volumeMounts may not overlap one another", apath)
+					allErrs = append(allErrs, field.Invalid(idxPath.Child("mountPath"), mnt.MountPath, errorString))
+				}
 			}
-			if !strings.Contains(rel, "../") {
-				errorString := fmt.Sprintf("conflicts with volumeMount:'%v', volumeMounts may not overlap one another", apath)
-				allErrs = append(allErrs, field.Invalid(idxPath.Child("mountPath"), mnt.MountPath, errorString))
-			}
+		} else {
+			glog.V(5).Infof("TSLOG: skipping mount overlap validation check for %s", container.Name)
 		}
 		mountpoints.Insert(mnt.MountPath)
 		if len(mnt.SubPath) > 0 {
