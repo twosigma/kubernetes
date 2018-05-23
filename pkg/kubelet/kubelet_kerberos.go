@@ -193,20 +193,19 @@ func (kl *Kubelet) podUpdateKerberos(pod *v1.Pod) {
 			if err := kl.verifyAndFixKeytab(pod, services, kl.hostname, podAllClusters,
 				keytabFilePath, user, false); err != nil {
 				glog.Errorf(krbutils.TSE+"failed to verify keytab for Pod %s in podUpdate handler, error: %+v", pod.Name, err)
-				// continue to the handler that will fix the keytabs
+
+				// invoke actual keytab handling function to fix the keytab
+				if err := kl.createKeytab(keytabFilePath, pod, services, podAllClusters, user, false); err != nil {
+					glog.Errorf(krbutils.TSE+"error creating keytab (in refresh) for Pod %s clusters %+v services %+v, error: %v",
+						pod.Name, podAllClusters, services, err)
+				} else {
+					glog.V(5).Infof(krbutils.TSL+"updated keytab file (during Pod refresh) for clusters %+v and services %+v for POD %q",
+						podAllClusters, services, format.Pod(pod))
+				}
+
 			} else {
 				// no need to proceed, all keytabs present
 				glog.V(5).Infof(krbutils.TSL+"keytab creation skipped (during Pod refresh) for clusters %+v and services %+v for POD %q",
-					podAllClusters, services, format.Pod(pod))
-				return
-			}
-
-			// invoke actual keytab handling function
-			if err := kl.createKeytab(keytabFilePath, pod, services, podAllClusters, user, false); err != nil {
-				glog.Errorf(krbutils.TSE+"error creating keytab (in refresh) for Pod %s clusters %+v services %+v, error: %v",
-					pod.Name, podAllClusters, services, err)
-			} else {
-				glog.V(5).Infof(krbutils.TSL+"updated keytab file (during Pod refresh) for clusters %+v and services %+v for POD %q",
 					podAllClusters, services, format.Pod(pod))
 			}
 		}
