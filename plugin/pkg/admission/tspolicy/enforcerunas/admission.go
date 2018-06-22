@@ -69,15 +69,20 @@ func (a *enforceRunAsUser) Admit(attributes admission.Attributes) (err error) {
 				attributes.GetOperation(), attributes.GetResource()))
 		}
 	} else {
-		// verify that all init and regular containers within the Pod have the same runAsUser as the Pod, if set
-		allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
-		for _, cont := range allContainers {
-			if cont.SecurityContext != nil && cont.SecurityContext.RunAsUser != nil {
-				if int(*cont.SecurityContext.RunAsUser) != int(*pod.Spec.SecurityContext.RunAsUser) {
-					return admission.NewForbidden(attributes, fmt.Errorf("unable to %s %v at this time because runAsUser at container level has to match the Pod level, if set", attributes.GetOperation(), attributes.GetResource()))
-				}
-			}
-		}
+                namespace := attributes.GetNamespace()
+                if (namespace != "kube-system") && (namespace != "contadm") {
+		        // verify that all init and regular containers within the Pod have the same runAsUser as the Pod, if set
+		        allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+		        for _, cont := range allContainers {
+			        if cont.SecurityContext != nil && cont.SecurityContext.RunAsUser != nil {
+				        if int(*cont.SecurityContext.RunAsUser) != int(*pod.Spec.SecurityContext.RunAsUser) {
+					        return admission.NewForbidden(attributes, fmt.Errorf("unable to %s %v at this time because runAsUser at container level has to match the Pod level, if set", attributes.GetOperation(), attributes.GetResource()))
+				        }
+			        }
+		        }
+                } else {
+                        glog.V(5).Infof(krbutils.TSL+"TSAdmission: Admitting system namespace %s, skipping validation.", namespace)
+                }
 		if pod.ObjectMeta.Annotations == nil {
 			pod.ObjectMeta.Annotations = map[string]string{}
 		}
