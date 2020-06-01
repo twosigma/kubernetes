@@ -435,6 +435,22 @@ func (kl *Kubelet) GetPodCgroupParent(pod *v1.Pod) string {
 	return cgroupParent
 }
 
+// GetNodenameForKernel gets hostname value to set in the hostname field (the nodename field of struct utsname) of the pod.
+func (kl *Kubelet) GetNodenameForKernel(hostname string, hostDomainName string, setHostnameAsFQDN *bool) (string, error) {
+	kernelHostname := hostname
+	// FQDN has to be 64 chars to fit in the Linux nodename kernel field (specification 64 chars and the null terminating char).
+	const fqdnMaxLen = 64
+	if len(hostDomainName) > 0 && setHostnameAsFQDN != nil && *setHostnameAsFQDN == true {
+		fqdn := fmt.Sprintf("%s.%s", hostname, hostDomainName)
+		// FQDN has to be shorter than hostnameMaxLen characters.
+		if len(fqdn) > fqdnMaxLen {
+			return "", fmt.Errorf("Failed to construct FQDN from pod hostname and cluster domain, FQDN %s is too long (%d characters is the max, %d characters requested)", fqdn, fqdnMaxLen, len(fqdn))
+		}
+		kernelHostname = fqdn
+	}
+	return kernelHostname, nil
+}
+
 // GenerateRunContainerOptions generates the RunContainerOptions, which can be used by
 // the container runtime to set parameters for launching a container.
 func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Container, podIP string, podIPs []string) (*kubecontainer.RunContainerOptions, func(), error) {
@@ -442,12 +458,18 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 	if err != nil {
 		return nil, nil, err
 	}
-
+	// The value of hostname is the short host name and it is sent to makeMounts to create /etc/hosts file.
 	hostname, hostDomainName, err := kl.GeneratePodHostNameAndDomain(pod)
 	if err != nil {
 		return nil, nil, err
 	}
-	opts.Hostname = hostname
+	// nodename will be equals to hostname if SetHostnameAsFQDN is nil or false. If SetHostnameFQDN
+	// is true and hostDomainName is defined, nodename will be the FQDN (hostname.hostDomainName)
+	nodename, err := kl.GetNodenameForKernel(hostname, hostDomainName, pod.Spec.SetHostnameAsFQDN)
+	if err != nil {
+		return nil, nil, err
+	}
+	opts.Hostname = nodename
 	podName := volumeutil.GetUniquePodName(pod)
 	volumes := kl.volumeManager.GetMountedVolumesForPod(podName)
 
